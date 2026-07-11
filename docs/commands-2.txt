@@ -1,0 +1,24 @@
+# start the server
+
+php -S 0.0.0.0:8000 -t public
+              │        └── "-t" sets the DOCUMENT ROOT: the folder that
+              │            URL paths are resolved against
+              └── listen address and port
+
+cd php-backend-solar-pi
+php -S 0.0.0.0:8000 -t public
+
+
+
+
+
+
+# the happy path — expect: HTTP/1.1 200 OK + the JSON
+curl -i "http://localhost:8000/load_profile.php" -H "Authorization: Bearer $TOKEN"
+curl.exe -i "http://localhost:8000/api-v1.php" -H "Authorization: Bearer $TOKEN"
+
+# a specific valid date, pretty-printed for human eyes
+# a specific valid date, pretty-printed for human eyes
+curl -s "http://localhost:8000/load_profile.php?date=2026-07-11" \
+     -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+curl -s "http://localhost:8000/load_profile.php?date=2026-07-11" -H "Authorization: Bearer %TOKEN%"
