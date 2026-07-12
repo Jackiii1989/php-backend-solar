@@ -1,2 +1,1 @@
 # Secrets: DB credentials + API token live here. Never commit.
-.env
