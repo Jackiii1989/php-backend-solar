@@ -64,9 +64,9 @@ function e(string $s): string
 <h1>⚡ IoT Metering Backend</h1>
 
 <p>
-    Backend for a Raspberry&nbsp;Pi energy-metering project. IN 15-minute
-    aggregates in, ESIT-style JSON API out. The meter dashboard will appear
-    here once live data flows.
+	This is the backend for an energy-metering project on a Raspberry Pi.
+	Input in 15-minute aggregates, output in ESIT-style JSON API. 
+	The meter dashboard will appear here once live data is flowing.
 </p>
 
 <h2>Your connection</h2>

@@ -1,5 +1,6 @@
 -- Schema for the IoT metering backend (MySQL/MariaDB).
 -- Load with: mysql -u root -p < db_schema.sql
+-- Get-Content db\schema.sql | mysql.exe -u root -p
 
 -- Design: docs/backend_php_project_plan.md, revised to a normalized
 -- two-table layout — meters (entities) and meter_aggregates (events),
