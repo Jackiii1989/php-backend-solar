@@ -10,14 +10,9 @@ require_once __DIR__ . '/../src/config.php';
 require_once __DIR__ . '/../src/api-helper.php';
 
 
-// ── Gate 1: only GET may pass ────────────────────────────────────────────
-// This endpoint READS data; GET is the HTTP verb for reading.
-if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
-    // The Allow header is part of the 405 contract: tell the client
-    // which verbs WOULD be accepted.
-    header('Allow: GET');
-    respond(405, ['error' => 'Method not allowed. Use GET.']);
-}
+// ── Gate 1: only GET may pass (shared helper — same 405 + Allow header
+//    behavior as ingest.php, defined exactly once) ────────────────────────
+require_method('GET');
 
 // ── Gate 2: authentication ───────────────────────────────────────────────
 // Same Bearer token as ingest — the load profile reveals when someone is

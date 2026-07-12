@@ -9,8 +9,6 @@ cd php-backend-solar-pi
 php -S 0.0.0.0:8000 -t public
 
 
-
-
 $TOKEN = "test123"
 
 # the happy path — expect: HTTP/1.1 200 OK + the JSON
@@ -26,3 +24,19 @@ curl -s "http://localhost:8000/load_profile.php?date=2026-07-11" -H "Authorizati
 curl.exe -i "https://optimasolar-freiamt.ch/api-v1.php" -H "Authorization: Bearer $TOKEN"
 curl.exe -ik "https://optimasolar-freiamt.ch/api-v1.php" -H "Authorization: Bearer $TOKEN"
 curl.exe -ik "https://optimasolar-freiamt.ch/authcheck.php" -H "Authorization: Bearer $TOKEN"
+
+
+
+#ingest.php commands
+
+Set-Content -Path payload.json -Value '{"meter_id":"mock-meter-001","window_start_utc":"2026-07-12T10:00:00+00:00","window_end_utc":"2026-07-12T10:15:00+00:00","energy_delta_kwh":0.1
+
+
+# error  405: method allowed
+curl.exe -i http://localhost:8000/ingest.php
+
+# error  401: wrong Bearer
+curl.exe -i -X POST http://localhost:8000/ingest.php -H "Authorization: Bearer wrong" --data "@payload.json"  
+
+# sucess  201: insert a data
+curl.exe -i -X POST http://localhost:8000/ingest.php -H "Authorization: Bearer YOUR_TOKEN" --data "@payload.json"                     
