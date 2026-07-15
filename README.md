@@ -2,7 +2,7 @@
 
 PHP backend for a Raspberry Pi IoT metering project.
 
-Architecture and design rationale are documented in[`arhitecture-decisions.md`](arhitecture-decisions.md).
+Architecture and design rationale are documented in[`arhitecture-decisions.md`](docs/arhitecture-decisions.md).
 
 ## Project structure
 
@@ -110,16 +110,32 @@ Read one meter's data for a UTC day:
 curl.exe -i "http://127.0.0.1:8000/api-v1.php?date=2026-07-12&meter_id=mock-meter-001" -H "Authorization: Bearer $TOKEN"
 ```
 
-Create `payload.json`:
+Create `payload.json` from the repository root in PowerShell:
 
-```json
+```powershell
+@'
 {
   "meter_id": "mock-meter-001",
   "window_start_utc": "2026-07-12T10:00:00+00:00",
   "window_end_utc": "2026-07-12T10:15:00+00:00",
   "energy_delta_kwh": 0.1
 }
+'@ | Set-Content -Encoding ascii payload.json
 ```
+
+The sample contains only ASCII characters, so `-Encoding ascii` avoids the
+UTF-8 byte-order mark added by Windows PowerShell's older `utf8` encoding.
+
+Confirm the file exists and contains valid JSON:
+
+```powershell
+Get-Content -Raw payload.json | ConvertFrom-Json | Format-List
+```
+
+Expected: PowerShell prints `meter_id`, both UTC timestamps, and
+`energy_delta_kwh`. Adjust the meter ID and timestamps as needed. Reusing the
+same meter and time window returns the intentional duplicate response instead
+of inserting a second row.
 
 Submit the aggregate:
 

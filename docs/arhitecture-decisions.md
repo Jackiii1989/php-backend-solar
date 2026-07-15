@@ -12,9 +12,9 @@ to precede the window end, but it does not enforce an exact 15-minute duration.
 The response format is inspired by the ESIT API, but the current endpoint
 returns measured energy in `kWh`; it does not calculate tariff prices yet.
 
-The future price engine and browser dashboard are outside the current
-implementation. The current `public/index.php` is an informational landing
-page rather than a database-backed dashboard.
+The future price engine remains outside the current implementation. The browser
+dashboard is implemented as a progressively loaded client of the existing
+authenticated read API; `public/index.php` does not query MySQL directly.
 
 ## System architecture
 
@@ -36,7 +36,13 @@ public/api-v1.php
     ^
     | GET + Bearer token
     |
-API client
+    +---------------- API client
+    |
+public/dashboard.js
+    ^
+    | loaded by the public dashboard page
+    |
+public/index.php
 ```
 
 The application uses plain procedural PHP without a framework or Composer.
@@ -62,9 +68,23 @@ the same `public/` directory.
 
 ### `public/index.php`
 
-Renders an informational HTML page. It displays connection information and
-escapes client-controlled strings with `htmlspecialchars()` to prevent XSS.
-It does not currently query the database.
+Renders the dashboard controls, an initially empty measurements table, and
+connection information. It does not query the database or receive the API
+token server-side. Client-controlled strings rendered by PHP are escaped with
+`htmlspecialchars()`.
+
+### `public/dashboard.js`
+
+Provides the browser behavior for the dashboard. After the user enters an API
+token, meter ID, and UTC date, it calls `api-v1.php` with the token in the
+`Authorization` header. A manual load starts polling; successful and retryable
+outcomes schedule the next request 15 seconds after the current request
+finishes.
+
+The script updates the existing table with DOM methods and `textContent`; it
+does not insert API values through `innerHTML`. A `4xx` response stops polling
+until the user corrects the controls and loads again. Retryable network or
+server failures leave the most recent successful table visible.
 
 ### `public/ingest.php`
 
@@ -139,6 +159,12 @@ revealing which part failed.
 The current design has one global token. It does not provide users, per-meter
 credentials, expiry, scopes, automatic rotation, or rate limiting.
 
+The dashboard does not embed this token in PHP or JavaScript. The user enters
+it into a password input for the current page, and `dashboard.js` sends it in
+the `Authorization` header. It is not included in the URL or written to
+`localStorage`. Because all browser JavaScript is downloadable, the public
+script must never contain a token or other secret.
+
 Some Apache/FastCGI configurations do not expose `Authorization` to PHP as
 `HTTP_AUTHORIZATION`. The tracked, correctly named `public/.htaccess` forwards
 the header with `SetEnvIf`, allowing the endpoint code to read it from
@@ -176,8 +202,10 @@ history, and `ON DELETE RESTRICT` so measurement history cannot be orphaned.
 
 ## Database connection layer
 
-`src/db.php` exposes a single `db(): PDO` factory. It lazily creates and reuses
-one connection within each PHP request.
+`src/db.php` exposes a `db(): PDO` factory. It lazily creates and reuses one
+connection within each PHP request. The `db_fetch_all()` helper prepares and
+executes reusable read queries, returns associative rows, logs detailed PDO
+failures server-side, and throws a generic `RuntimeException` to callers.
 
 PDO is configured with:
 
@@ -313,13 +341,21 @@ The documented production target is Plesk with TLS and `public/` configured as
 the document root. Server-specific `.env` values should be installed outside
 version control with restrictive file permissions.
 
+`public/dashboard.js` is intentionally a public static asset because the
+browser must download it. Files containing server-side implementation details
+or secrets remain outside `public/`. Backup PHP files must also remain outside
+the document root because any PHP file placed there can be requested directly.
+
 TLS verification must remain enabled whenever credentials are transmitted.
 Using curl's `-k` option with an API token defeats certificate verification and
 can expose the token.
 
 ## Current limitations and future work
 
-- The HTML landing page is not yet a meter dashboard.
+- The dashboard displays one meter and one UTC day at a time.
+- The user must enter the shared API token after opening the page; there is no
+  dashboard login or server-side session.
+- Dashboard updates use 15-second polling rather than server push.
 - There is no price engine or tariff-price table.
 - Authentication uses one global shared token.
 - There is no rate limiting or audit log.

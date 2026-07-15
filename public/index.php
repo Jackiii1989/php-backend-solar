@@ -5,73 +5,6 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../src/db.php';
 
-/*
- * Load every registered meter.
- *
- * Begin with a simple query before joining measurement data. This confirms
- * that the dashboard can access the database and provides its base records.
- */
-$sql_meters = '
-    SELECT
-        meter_id,
-        name,
-        description,
-        created_at_utc
-    FROM meters
-    ORDER BY meter_id
-';
-
-
-
-
-
-
-/*
- * Load every registered meter and its latest aggregate.
- *
- * LEFT JOIN keeps meters that have never submitted a reading. The correlated
- * subquery selects one latest row, using the ID to break timestamp ties.
- */
-$sql_aggregates = '
-    SELECT
-        m.meter_id,
-        m.name,
-        m.description,
-        m.created_at_utc,
-        latest.window_start_utc,
-        latest.window_end_utc,
-        latest.energy_delta_kwh,
-        latest.received_at_utc
-    FROM meters AS m
-    LEFT JOIN meter_aggregates AS latest
-        ON latest.id = (
-            SELECT aggregate_row.id
-            FROM meter_aggregates AS aggregate_row
-            WHERE aggregate_row.meter_id = m.meter_id
-            ORDER BY
-                aggregate_row.window_end_utc DESC,
-                aggregate_row.id DESC
-            LIMIT 1
-        )
-    ORDER BY m.meter_id
-';
-
-$meters = [];
-$aggregates = [];
-$dashboardError = null;
-
-try {
-    $meters = db_fetch_all($sql_meters);
-    $aggregates = db_fetch_all($sql_aggregates);
-} catch (RuntimeException $error) {
-    /*
-     * db() and db_fetch_all() already log the technical details.
-     * The page exposes only a safe, useful message.
-     */
-    $dashboardError = 'Meter data is temporarily unavailable. Please try again later.';
-}
-
-
 // ── Gather everything we want to display ─────────────────────────────────
 // A page has the same anatomy as an endpoint: collect + validate data
 // FIRST, render LAST. Never mix the two phases.
@@ -109,16 +42,6 @@ function e(string $s): string
     return htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
 }
 
-/* For debugging only if something goes wrong.*/
-/*
-echo '<pre>';
-echo e(print_r($meters, true));
-echo '</pre>';
-
-echo '<pre>';
-echo e(print_r($aggregates, true));
-echo '</pre>';
-*/
 
 ?>
 <!DOCTYPE html>
@@ -126,7 +49,11 @@ echo '</pre>';
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>optimasolar-freiamt — IoT Metering Backend</title>
+
+    <!-- Dashboard behavior; defer waits until the HTML has been parsed. -->
+    <script src="/dashboard.js" defer></script> 
+
+    <title>IoT Metering Backend</title>
     <style>
         /* minimal, self-contained styling — no external files needed */
         body  { font-family: system-ui, sans-serif; max-width: 46rem;
@@ -146,42 +73,63 @@ echo '</pre>';
 <h1>⚡ IoT Metering Backend</h1>
 
 <h2>Meter dashboard</h2>
-<?php if ($dashboardError !== null): ?>
-    <p class="warn"><?= e($dashboardError) ?></p>
-<?php else: ?>
-    <table>
-        <thead>
-            <tr>
-                <th>Meter</th>
-                <th>Description</th>
-                <th>Latest window (UTC)</th>
-                <th>Energy</th>
-                <th>Received (UTC)</th>
-            </tr>
-        </thead>
-        <tbody>
-            <?php foreach ($aggregates as $meter): ?>
-                <tr>
-                    <td> <!--<strong><?= e((string) $meter['name']) ?></strong><br> --> <code><?= e((string) $meter['meter_id']) ?></code>  </td>
-                    <td><?= e((string) $meter['description']) ?></td>
-                    <?php if ($meter['window_start_utc'] === null): ?>
-                        <td colspan="3">
-                            <span class="warn">No readings received</span>
-                        </td>
-                    <?php else: ?>
-                        <td>
-                            <?= e((string) $meter['window_start_utc']) ?><br>
-                            <?= e((string) $meter['window_end_utc']) ?>
-                        </td>
-                
-                        <td><?= e((string) $meter['energy_delta_kwh']) ?> kWh</td>
-                        <td><?= e((string) $meter['received_at_utc']) ?></td>
-                    <?php endif; ?>
-                </tr>
-            <?php endforeach; ?>
-        </tbody>
-    </table>
-<?php endif; ?>
+
+<div id="dashboard-controls">
+    <p>
+        <label for="dashboard-token">API token</label><br>
+
+        <input
+            id="dashboard-token"
+            type="password"
+            autocomplete="current-password"
+        >
+    </p>
+
+    <p>
+        <label for="dashboard-meter">Meter ID</label><br>
+
+        <input
+            id="dashboard-meter"
+            type="text"
+            value="mock-meter-001"
+        >
+    </p>
+
+    <p>
+        <label for="dashboard-date">UTC date</label><br>
+
+        <input
+            id="dashboard-date"
+            type="date"
+            value="<?= e(gmdate('Y-m-d')) ?>"
+        >
+    </p>
+
+    <!--
+        This is deliberately not a submit button. Until JavaScript is added,
+        the token must not accidentally be placed in a URL or form request.
+    -->
+    <button id="dashboard-load" type="button">
+        Load measurements
+    </button>
+</div>
+
+<p id="dashboard-status">
+    Enter the API token, meter ID, and date to load measurements.
+</p>
+
+<table id="dashboard-table" hidden>
+    <thead>
+        <tr>
+            <th>Start (UTC)</th>
+            <th>End (UTC)</th>
+            <th>Energy</th>
+        </tr>
+    </thead>
+
+    <!-- JavaScript will safely create and insert rows here. -->
+    <tbody id="dashboard-slots"></tbody>
+</table>
 
 
 <h2>Your connection</h2>

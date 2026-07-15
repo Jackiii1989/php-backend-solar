@@ -24,77 +24,95 @@ development. Never print its secret values.
 - `public/ingest.php` validates and stores authenticated energy aggregates.
 - `public/api-v1.php` reads database-backed daily energy slots.
 - Both endpoints use the shared Bearer token from configuration.
-- `src/db.php` provides the shared PDO connection.
+- `src/db.php` provides the shared PDO connection and `db_fetch_all()` read
+  helper.
 - `public/.htaccess` is correctly named and forwards `Authorization` for
   Apache/FastCGI.
 - The API intentionally returns `"unit": "kWh"` both at response level and
   inside each slot.
-- `public/index.php` is still an informational page rather than a real meter
-  dashboard.
+- `public/index.php` renders dashboard controls and an initially empty table;
+  it does not query the database directly.
+- `public/dashboard.js` calls the authenticated GET API and updates the table
+  without reloading the complete page.
 
-## Current development task
+## Completed dashboard task
 
-Build the database-backed dashboard in `public/index.php` incrementally.
+The browser dashboard is now working with this flow:
 
-### Pending step 1: load registered meters
-
-The user has been instructed to add this immediately after
-`declare(strict_types=1);`:
-
-```php
-require_once __DIR__ . '/../src/db.php';
-
-/*
- * Load every registered meter.
- *
- * Begin with a simple query before joining measurement data. This confirms
- * that the dashboard can access the database and provides its base records.
- */
-$sql = '
-    SELECT
-        meter_id,
-        name,
-        description,
-        created_at_utc
-    FROM meters
-    ORDER BY meter_id
-';
-
-$meters = db()->query($sql)->fetchAll();
+```text
+public/index.php
+    |
+    | loads public/dashboard.js
+    v
+User enters API token, meter ID, and UTC date
+    |
+    | GET /api-v1.php + Authorization: Bearer <token>
+    v
+public/api-v1.php
+    |
+    | authenticated prepared SELECT
+    v
+MySQL/MariaDB
 ```
 
-After the existing `e()` function and before `?>`, the user should temporarily
-add:
+Dashboard behavior:
 
-```php
-/* Temporary development output; replace it with the table in a later step. */
-echo '<pre>';
-echo e(print_r($meters, true));
-echo '</pre>';
-```
+- The first load is triggered by the **Load measurements** button.
+- The API token is read from a password input and sent only in the
+  `Authorization` header. It is not embedded in PHP or JavaScript, included in
+  the URL, or written to `localStorage`.
+- After a load, retryable outcomes schedule another request 15 seconds after
+  the current request finishes. `setTimeout()` is used so requests do not
+  overlap.
+- A `4xx` response stops polling until the user corrects the controls and loads
+  again.
+- API values are rendered with DOM creation and `textContent`, not
+  `innerHTML`.
+- An empty `slots` array hides the table and displays a normal “no
+  measurements” status.
+- A later network or server failure leaves the most recent successful table
+  visible and displays a warning.
 
-Test with:
+## Security boundary
 
-```powershell
-php -S 127.0.0.1:8000 -t public
-```
+- `public/dashboard.js` is intentionally public because browsers must download
+  it. It contains no credentials.
+- Measurement data remains protected by `api-v1.php` Bearer authentication.
+- The same global token currently authorizes both reads and ingestion. Token
+  separation, dashboard sessions, and rate limiting are future improvements.
+- Production dashboard use requires verified HTTPS.
+- Never place backup PHP files inside `public/`. During development,
+  `public/_index.php` was found to be reachable without the new dashboard
+  authentication flow and was moved to `backup/_index.php` outside the web
+  document root.
 
-Then open `http://127.0.0.1:8000/`. Expected: the page displays the registered
-meter array, including `mock-meter-001`. This step is pending; do not assume it
-has been implemented until the user confirms the result.
+## Verification completed
 
-## Planned dashboard sequence
+On 2026-07-15, the following checks passed:
 
-After step 1 succeeds:
+- Every PHP file under `src/` and `public/` passed `php -l`.
+- `public/dashboard.js` passed `node --check` when a local Node runtime was
+  available.
+- `GET /` returned `200`.
+- `GET /dashboard.js` returned `200`.
+- The rendered page referenced `/dashboard.js`.
+- `GET /api-v1.php` without a token returned `401`.
+- `GET /_index.php` returned `404` after the backup was moved.
+- The user confirmed that authenticated measurement loading and polling work
+  in the browser.
 
-1. Replace the simple query with a `LEFT JOIN` that retrieves the latest
-   aggregate while retaining registered meters with no readings.
-2. Replace temporary debug output with an escaped HTML table.
-3. Add clear “no readings” presentation for silent meters.
-4. Add controlled database-error handling without exposing SQL or credentials.
-5. Add an optional 15-second page refresh.
-6. Test meters with readings, meters without readings, output escaping, and
-   database failure behavior.
+## Current limitations and next work
 
-Do not present all implementation code at once. Continue one confirmed step at
-a time.
+- The dashboard supports one meter and one UTC day at a time.
+- The user must enter the shared API token after opening the page.
+- There is no dashboard login/session, rate limiting, or audit log.
+- `api-v1.php` still needs a uniform JSON error boundary for unexpected
+  database failures.
+- There is no automated test suite.
+
+Recommended next development step: add controlled read-side exception handling
+to `api-v1.php` so a database outage returns the normal generic JSON `500`
+contract instead of following PHP's display-error configuration. Treat that as
+a separate, reviewable change.
+
+Continue to present one confirmed implementation step at a time.
