@@ -1,1 +1,5 @@
 # Secrets: DB credentials + API token live here. Never commit.
+
+
+# project internal files
+/src/_*

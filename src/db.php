@@ -56,3 +56,32 @@ function db(): PDO
 
     return $pdo;
 }
+
+
+/**
+ * Execute a SELECT query and return all result rows.
+ *
+ * Detailed PDO errors are written to the server log. Callers receive a generic
+ * exception so database and SQL details are not exposed in an HTTP response.
+ *
+ * @param array<string, mixed> $parameters Values for named SQL placeholders.
+ * @return array<int, array<string, mixed>>
+ */
+function db_fetch_all(string $sql, array $parameters = []): array
+{
+    try {
+        $statement = db()->prepare($sql);
+        $statement->execute($parameters);
+
+        return $statement->fetchAll();
+        
+    } catch (PDOException $error) {
+        error_log('db_fetch_all() failed: ' . $error->getMessage());
+
+        /*
+         * Do not attach the original PDOException. Its details belong only
+         * in the server log.
+         */
+        throw new RuntimeException('Database read failed.');
+    }
+}

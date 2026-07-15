@@ -1,5 +1,7 @@
-# start the server
+# check if index has errors: syntax is okay and so on. 
+php -l public\index.php
 
+# start the server
 php -S 0.0.0.0:8000 -t public
               │        └── "-t" sets the DOCUMENT ROOT: the folder that
               │            URL paths are resolved against

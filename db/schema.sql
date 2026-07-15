@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS meter_aggregates(
 	-- exact decimal number that 12 degits before decimal point and 6 digits after decimal point
 	energy_delta_kwh DECIMAL(12,6) NOT NULL,
 	received_at_utc DATETIME NOT NULL,
-	-- when doing this command UNIQUE KEY, the database create an extra interl data structure beside the main table storage. 
+	-- when doing this command UNIQUE KEY, the database create an extra internal data structure beside the main table storage. 
 	-- The extra structure is a B-tree index.
 	UNIQUE KEY uq_meter_window (meter_id, window_start_utc, window_end_utc),
 	FOREIGN KEY (meter_id)

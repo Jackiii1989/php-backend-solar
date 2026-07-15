@@ -2,6 +2,76 @@
 
 declare(strict_types=1);
 
+
+require_once __DIR__ . '/../src/db.php';
+
+/*
+ * Load every registered meter.
+ *
+ * Begin with a simple query before joining measurement data. This confirms
+ * that the dashboard can access the database and provides its base records.
+ */
+$sql_meters = '
+    SELECT
+        meter_id,
+        name,
+        description,
+        created_at_utc
+    FROM meters
+    ORDER BY meter_id
+';
+
+
+
+
+
+
+/*
+ * Load every registered meter and its latest aggregate.
+ *
+ * LEFT JOIN keeps meters that have never submitted a reading. The correlated
+ * subquery selects one latest row, using the ID to break timestamp ties.
+ */
+$sql_aggregates = '
+    SELECT
+        m.meter_id,
+        m.name,
+        m.description,
+        m.created_at_utc,
+        latest.window_start_utc,
+        latest.window_end_utc,
+        latest.energy_delta_kwh,
+        latest.received_at_utc
+    FROM meters AS m
+    LEFT JOIN meter_aggregates AS latest
+        ON latest.id = (
+            SELECT aggregate_row.id
+            FROM meter_aggregates AS aggregate_row
+            WHERE aggregate_row.meter_id = m.meter_id
+            ORDER BY
+                aggregate_row.window_end_utc DESC,
+                aggregate_row.id DESC
+            LIMIT 1
+        )
+    ORDER BY m.meter_id
+';
+
+$meters = [];
+$aggregates = [];
+$dashboardError = null;
+
+try {
+    $meters = db_fetch_all($sql_meters);
+    $aggregates = db_fetch_all($sql_aggregates);
+} catch (RuntimeException $error) {
+    /*
+     * db() and db_fetch_all() already log the technical details.
+     * The page exposes only a safe, useful message.
+     */
+    $dashboardError = 'Meter data is temporarily unavailable. Please try again later.';
+}
+
+
 // ── Gather everything we want to display ─────────────────────────────────
 // A page has the same anatomy as an endpoint: collect + validate data
 // FIRST, render LAST. Never mix the two phases.
@@ -38,6 +108,18 @@ function e(string $s): string
 {
     return htmlspecialchars($s, ENT_QUOTES, 'UTF-8');
 }
+
+/* For debugging only if something goes wrong.*/
+/*
+echo '<pre>';
+echo e(print_r($meters, true));
+echo '</pre>';
+
+echo '<pre>';
+echo e(print_r($aggregates, true));
+echo '</pre>';
+*/
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -63,11 +145,44 @@ function e(string $s): string
 
 <h1>⚡ IoT Metering Backend</h1>
 
-<p>
-	This is the backend for an energy-metering project on a Raspberry Pi.
-	Input in 15-minute aggregates, output in ESIT-style JSON API. 
-	The meter dashboard will appear here once live data is flowing.
-</p>
+<h2>Meter dashboard</h2>
+<?php if ($dashboardError !== null): ?>
+    <p class="warn"><?= e($dashboardError) ?></p>
+<?php else: ?>
+    <table>
+        <thead>
+            <tr>
+                <th>Meter</th>
+                <th>Description</th>
+                <th>Latest window (UTC)</th>
+                <th>Energy</th>
+                <th>Received (UTC)</th>
+            </tr>
+        </thead>
+        <tbody>
+            <?php foreach ($aggregates as $meter): ?>
+                <tr>
+                    <td> <!--<strong><?= e((string) $meter['name']) ?></strong><br> --> <code><?= e((string) $meter['meter_id']) ?></code>  </td>
+                    <td><?= e((string) $meter['description']) ?></td>
+                    <?php if ($meter['window_start_utc'] === null): ?>
+                        <td colspan="3">
+                            <span class="warn">No readings received</span>
+                        </td>
+                    <?php else: ?>
+                        <td>
+                            <?= e((string) $meter['window_start_utc']) ?><br>
+                            <?= e((string) $meter['window_end_utc']) ?>
+                        </td>
+                
+                        <td><?= e((string) $meter['energy_delta_kwh']) ?> kWh</td>
+                        <td><?= e((string) $meter['received_at_utc']) ?></td>
+                    <?php endif; ?>
+                </tr>
+            <?php endforeach; ?>
+        </tbody>
+    </table>
+<?php endif; ?>
+
 
 <h2>Your connection</h2>
 <table>

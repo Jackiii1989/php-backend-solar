@@ -40,7 +40,8 @@ mysql -u root -p -e "DROP USER IF EXISTS 'iot_meter_backend'@'localhost';"
 mysql -u iot_meter_backend -p -e "SHOW TABLES FROM iot_metering;"
 
 
-## Testing PHP
+## PHP debugging commands
+
 # testing config:
 php -r "require 'src/config.php'; echo config('DB_NAME');"
 
@@ -48,4 +49,10 @@ php -r "require 'src/config.php'; echo config('DB_NAME');"
 php -r "require 'src/config.php'; echo config('API_TOKEN');"
 
 # test db code
- php -r "require 'src/db.php'; print_r(db()->query('SELECT * FROM meters')->fetchAll());"
+php -r "require 'src/db.php'; print_r(db()->query('SELECT * FROM meters')->fetchAll());"
+
+# test syntax error
+php -l public\index.php
+
+#check the function db_fetch_all
+php -r "require 'src/db.php'; print_r(db_fetch_all('SELECT meter_id FROM meters ORDER BY meter_id'));"
