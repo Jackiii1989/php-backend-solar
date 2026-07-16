@@ -7,9 +7,12 @@ php -S 0.0.0.0:8000 -t public
               │            URL paths are resolved against
               └── listen address and port
 
+# how to start it local on the PC
 cd php-backend-solar-pi
 php -S 0.0.0.0:8000 -t public
 
+
+## curl commands 
 
 $TOKEN = "test123"
 
@@ -29,10 +32,17 @@ curl.exe -ik "https://optimasolar-freiamt.ch/authcheck.php" -H "Authorization: B
 
 
 
-#ingest.php commands
+## api-v1
+
+curl.exe -i "http://127.0.0.1:8000/api-v1.php?date=2026-07-14&meter_id=mock-meter-001" -H "Authorization: Bearer $TOKEN"
+
+curl.exe -i "http://127.0.0.1:8000/api-v1.php?date=2026-07-14&meter_id=mock-meter-001" -H "Authorization: Bearer $TOKEN"
+
+
+
+## ingest.php commands
 
 Set-Content -Path payload.json -Value '{"meter_id":"mock-meter-001","window_start_utc":"2026-07-12T10:00:00+00:00","window_end_utc":"2026-07-12T10:15:00+00:00","energy_delta_kwh":0.1
-
 
 # error  405: method allowed
 curl.exe -i http://localhost:8000/ingest.php
@@ -42,3 +52,17 @@ curl.exe -i -X POST http://localhost:8000/ingest.php -H "Authorization: Bearer w
 
 # sucess  201: insert a data
 curl.exe -i -X POST http://localhost:8000/ingest.php -H "Authorization: Bearer YOUR_TOKEN" --data "@payload.json"                     
+
+
+## php diverse
+
+
+# get where the temp dir is stored. 
+php -r 'echo sys_get_temp_dir(), PHP_EOL;'
+
+# test if rate limiter is working:
+$env:RATE_LIMIT_TEST_BUCKET = "helper-test-" + [guid]::NewGuid()
+1..3 | ForEach-Object {php -r "`$_SERVER['REMOTE_ADDR'] = '127.0.0.99'; require 'src/api-helper.php'; require 'src/rate-limit.php'; require_rate_limit(getenv('RATE_LIMIT_TEST_BUCKET'), 2, 60); echo 'allowed', PHP_EOL;"}
+
+
+php -r "require 'src/config.php'; echo 'read=', config_positive_int('RATE_LIMIT_API_V1_MAX_REQUESTS', 60), PHP_EOL, 'ingest=', config_positive_int('RATE_LIMIT_INGEST_MAX_REQUESTS', 20), PHP_EOL, 'window=', config_positive_int('RATE_LIMIT_WINDOW_SECONDS', 60), PHP_EOL;"

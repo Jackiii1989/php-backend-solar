@@ -87,4 +87,77 @@ function config(string $key, ?string $default = null): string
     error_log("Missing required config key: {$key}");
     exit('Server misconfigured.');
 }
+
+
+/**
+ * Return a configuration value as a positive integer.
+ *
+ * Environment variables and .env values arrive as strings, even when they
+ * contain digits. This helper validates the complete value before converting
+ * it to an integer.
+ *
+ * Examples:
+ *   "60"  -> 60
+ *   "1"   -> 1
+ *   "0"   -> configuration error
+ *   "-5"  -> configuration error
+ *   "abc" -> configuration error
+ */
+function config_positive_int(string $key, int $default): int
+{
+    /*
+     * The default is written directly in application code. An invalid default
+     * therefore indicates a programming error, not a deployment error.
+     */
+    if ($default < 1) {
+        throw new InvalidArgumentException(
+            'The default configuration value must be positive.'
+        );
+    }
+
+    /*
+     * config() applies the existing lookup order:
+     *
+     *     process environment -> .env file -> supplied default
+     *
+     * The integer default is converted to a string because config() returns
+     * configuration values as strings.
+     */
+    $rawValue = config($key, (string) $default);
+
+    /*
+     * FILTER_VALIDATE_INT validates the complete string and returns the
+     * converted integer. min_range rejects zero and negative values.
+     *
+     * A direct cast such as (int) "abc" would silently produce 0, which could
+     * disable or break the limiter without clearly identifying the problem.
+     */
+    $value = filter_var(
+        $rawValue,
+        FILTER_VALIDATE_INT,
+        [
+            'options' => [
+                'min_range' => 1,
+            ],
+        ]
+    );
+
+    if ($value === false) {
+        /*
+         * Log only the configuration key, never its value. This avoids
+         * accidentally exposing a sensitive value if the helper is reused.
+         */
+        error_log("Configuration key must be a positive integer: {$key}");
+
+        /*
+         * Match the existing config() failure behavior: report a generic
+         * server configuration problem without revealing internal details.
+         */
+        http_response_code(500);
+        exit('Server misconfigured.');
+    }
+
+    return $value;
+}
+
 ?>

@@ -321,6 +321,7 @@ Responses:
 - `401`: missing or invalid token
 - `404`: unknown meter
 - `405`: wrong method, with an `Allow` header
+- `500`: unexpected server or database failure
 
 ## Error handling
 
@@ -330,10 +331,15 @@ so endpoint failures use consistent status codes and `Content-Type` headers.
 Ingestion catches expected PDO errors and hides internal SQL details from the
 client. Unexpected failures are logged and returned as generic errors.
 
-The GET endpoint currently does not wrap database calls in equivalent exception
-handling. A database outage on that path may therefore follow PHP's configured
-error behavior instead of returning the normal JSON contract. Production PHP
-should use `display_errors=Off` and `log_errors=On`.
+The GET endpoint wraps meter lookup, aggregate retrieval, and outbound row
+conversion in a `Throwable` boundary. PDO query failures and the generic
+`RuntimeException` produced by `db()` are logged server-side and returned as a
+generic JSON `500` response. Method, authentication, and request validation
+remain before this boundary, so invalid callers still receive their specific
+`405`, `401`, or `400` responses without attempting database work.
+
+Production PHP should still use `display_errors=Off` and `log_errors=On` as
+defense in depth.
 
 ## Deployment model
 
@@ -361,4 +367,3 @@ can expose the token.
 - There is no rate limiting or audit log.
 - There is no automated test suite or Composer configuration.
 - Database schema changes are managed manually rather than through migrations.
-- Read-side database exceptions do not yet have a uniform JSON error boundary.

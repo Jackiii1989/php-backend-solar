@@ -23,6 +23,8 @@ development. Never print its secret values.
 - Plain PHP 8 application with MySQL/MariaDB and no Composer dependencies.
 - `public/ingest.php` validates and stores authenticated energy aggregates.
 - `public/api-v1.php` reads database-backed daily energy slots.
+- `public/api-v1.php` catches unexpected read-side failures, logs technical
+  details server-side, and returns a generic JSON `500` response.
 - Both endpoints use the shared Bearer token from configuration.
 - `src/db.php` provides the shared PDO connection and `db_fetch_all()` read
   helper.
@@ -101,18 +103,25 @@ On 2026-07-15, the following checks passed:
 - The user confirmed that authenticated measurement loading and polling work
   in the browser.
 
+On 2026-07-16, the read-side error boundary was verified:
+
+- `public/api-v1.php` passed `php -l` after the `Throwable` boundary was added.
+- A request without the Bearer header returned `401` before database access.
+- With a valid token and MySQL stopped, the endpoint returned generic JSON
+  `500` without a stack trace or database details.
+- After MySQL restarted, the same authenticated request returned the normal
+  `200` response.
+
 ## Current limitations and next work
 
 - The dashboard supports one meter and one UTC day at a time.
 - The user must enter the shared API token after opening the page.
 - There is no dashboard login/session, rate limiting, or audit log.
-- `api-v1.php` still needs a uniform JSON error boundary for unexpected
-  database failures.
 - There is no automated test suite.
 
-Recommended next development step: add controlled read-side exception handling
-to `api-v1.php` so a database outage returns the normal generic JSON `500`
-contract instead of following PHP's display-error configuration. Treat that as
-a separate, reviewable change.
+Recommended next development step: make the GET API status checks repeatable,
+starting with `200`, `400`, `401`, `404`, and `405` integration tests under
+`tests/`. Keep the database-outage `500` test manual until the test harness has
+a safe way to control an isolated database service.
 
 Continue to present one confirmed implementation step at a time.

@@ -2,8 +2,9 @@
 
 /**
  * Ingest endpoint — receives one 15-minute aggregate per POST from the Pi.
- * Contract: 201 stored / 200 already stored (retry) / 401 bad token /
- * 405 wrong method / 400 bad payload / 422 unknown meter.
+ * Contract: 201 stored / 200 already stored (retry) / 400 bad payload /
+ * 401 bad token / 405 wrong method / 422 unknown meter /
+ * 429 rate limit exceeded / 500 unexpected server or database failure.
  */
 
 declare(strict_types=1);
@@ -12,13 +13,46 @@ declare(strict_types=1);
 // includes
 require_once __DIR__ . '/../src/db.php';
 require_once __DIR__ . '/../src/api-helper.php';
+require_once __DIR__ . '/../src/rate-limit.php';
 
 
-// ── The gauntlet: cheapest gate first, body parsed only after auth ──────
+// ── Gate 1: HTTP method ─────────────────────────────────────────────────
+// Reject incorrect methods before doing authentication, filesystem, or JSON
+// processing work.
 require_method('POST');
-require_bearer_token($_SERVER['HTTP_AUTHORIZATION'] ?? '', config('API_TOKEN'));
-$payload = read_json_body();
 
+
+// ── Gate 2: rate limiting ───────────────────────────────────────────────
+// Ingestion has its own endpoint name, so its counter is independent from
+// dashboard requests to api-v1.
+//
+// A meter normally sends one aggregate every 15 minutes. Twenty requests per
+// minute still permits retries and short bursts while restricting abuse.
+require_rate_limit(
+    'ingest',
+
+    // Maximum ingestion requests per client during one window.
+    // The code default remains 20 if the setting is absent.
+    config_positive_int('RATE_LIMIT_INGEST_MAX_REQUESTS', 20),
+
+    // Both endpoints use the same configurable window duration.
+    // The code default remains 60 if the setting is absent.
+    config_positive_int('RATE_LIMIT_WINDOW_SECONDS_INGEST', 60)
+);
+
+
+// ── Gate 3: authentication ──────────────────────────────────────────────
+// Rate limiting runs before this check so invalid-token attempts also consume
+// the client's allowance.
+require_bearer_token(
+    $_SERVER['HTTP_AUTHORIZATION'] ?? '',
+    config('API_TOKEN_GET_USAGE')
+);
+
+
+// ── Gate 4: JSON body ───────────────────────────────────────────────────
+// Body parsing happens only after method, rate-limit, and authentication gates.
+$payload = read_json_body();
 
 // Collect ALL problems, then answer once — a client fixing its payload
 // wants the full list, not one complaint per round trip.

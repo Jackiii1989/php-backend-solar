@@ -9,7 +9,8 @@
  *
  *   200 day of slots (possibly empty) | 400 bad date | 401 bad token
  *   404 unknown meter                 | 405 wrong verb
- *
+ *   429 rate limit exceeded           | 500 unexpected server or database failure
+ * 
  * This is the read-side twin of ingest.php: what the Pi POSTs in,
  * a client GETs back out — same table, opposite direction.
  */
@@ -23,13 +24,34 @@ declare(strict_types=1);
 require_once __DIR__ . '/../src/config.php'; # function to get the environment variables
 require_once __DIR__ . '/../src/api-helper.php'; # helper api functions
 require_once __DIR__ . '/../src/db.php'; # database functions.
+require_once __DIR__ . '/../src/rate-limit.php'; // shared API rate limiter
 
 
 // ── Gate 1: only GET may pass (shared helper — same 405 + Allow header
 //    behavior as ingest.php, defined exactly once) ────────────────────────
 require_method('GET');
 
-// ── Gate 2: authentication ───────────────────────────────────────────────
+// ── Gate 2: rate limiting ────────────────────────────────────────────────
+// Keep a separate allowance for this endpoint and each connecting IP.
+// The dashboard polls once every 15 seconds (about four requests/minute),
+// so 60 requests/minute leaves enough room for normal use and manual reloads.
+//
+// This gate runs before authentication so repeated attempts with missing or
+// incorrect Bearer tokens also consume the request allowance.
+require_rate_limit(
+    'api-v1',
+
+    // Maximum read requests per client during one window.
+    // The code default remains 60 if the setting is absent.
+    config_positive_int('RATE_LIMIT_API_V1_MAX_REQUESTS', 60),
+
+    // Shared duration of one rate-limit window in seconds.
+    // The code default remains 60 if the setting is absent.
+    config_positive_int('RATE_LIMIT_WINDOW_SECONDS_API_V1', 60)
+);
+
+
+// ── Gate 3: authentication ───────────────────────────────────────────────
 // Same Bearer token as ingest — the load profile reveals when someone is
 // home / on holiday, so it is NOT public (unlike ESIT's prices).
 //
@@ -40,10 +62,10 @@ require_method('GET');
 // "?? ''" (null coalescing) substitutes an empty string — the function
 // always receives a real string, and "missing" flows into the normal
 // comparison as a failed match.
-require_bearer_token($_SERVER['HTTP_AUTHORIZATION'] ?? '', config('API_TOKEN'));
+require_bearer_token($_SERVER['HTTP_AUTHORIZATION'] ?? '', config('API_TOKEN_GET_USAGE'));
 
 
-// ── Gate 3: the ?date= query parameter ───────────────────────────────────
+// ── Gate 4: the ?date= query parameter ───────────────────────────────────
 // Optional; default is today in UTC (gmdate = date() in UTC).
 $date = $_GET['date'] ?? gmdate('Y-m-d');
 
@@ -62,10 +84,10 @@ if ($dayStart === false || $dayStart->format('Y-m-d') !== $date) {
 //print($dayStart->format('Y-m-d H:i:s'));
 //var_dump($dayStart);
 
-// ── Gate 4: which meter? ─────────────────────────────────────────────────
+// ── Gate 5: which meter? ─────────────────────────────────────────────────
 // The response declares ONE meter_id, so one meter per request.
 // Default = our only meter, purely for convenience while there's one.
-$meterId = $_GET['meter_id'] ?? 'mock-meter-001';
+$meterId = $_GET['meter_id'] ?? '';
 
 
 // The meters table is the allowlist for reads too. Asking for an
@@ -76,75 +98,91 @@ $meterId = $_GET['meter_id'] ?? 'mock-meter-001';
 //
 // prepare/execute with a placeholder even for this tiny query: the
 // meter_id came from the URL — user input NEVER gets glued into SQL.
-$stmt = db()->prepare('SELECT meter_id FROM meters WHERE meter_id = :meter_id');
-$stmt->execute([':meter_id' => $meterId]);
-if ($stmt->fetch() === false) {           // no row -> fetch() returns false
-    respond(404, ['error' => "Unknown meter_id '{$meterId}'."]);
+try {
+    $stmt = db()->prepare('SELECT meter_id FROM meters WHERE meter_id = :meter_id');
+    $stmt->execute([':meter_id' => $meterId]);
+    if ($stmt->fetch() === false) {           // no row -> fetch() returns false
+        respond(404, ['error' => "Unknown meter_id '{$meterId}'."]);
+    }
+
+    // ── Fetch the day's slots ────────────────────────────────────────────────
+    // The day is a HALF-OPEN interval: [ dayStart, dayStart + 1 day )
+    //   window_start_utc >= 00:00 of the day    (>=  : midnight included)
+    //   window_start_utc <  00:00 of NEXT day   (<   : next midnight excluded)
+    //
+    // Why "< nextDay" and not "<= 23:59:59"? Because between 23:59:59 and
+    // 00:00:00 there is an infinity of moments (23:59:59.5 ...) that a
+    // closed interval silently loses. Half-open intervals mean every moment
+    // belongs to EXACTLY one day: no gaps, no double counting. Our windows
+    // already work this way (10:00–10:15, then 10:15–10:30: the instant
+    // 10:15 belongs to the second window).
+    //
+    // P1D = ISO 8601 duration: P(eriod) 1 D(ay). Immutable ->add() returns
+    // a NEW object; $dayStart itself is untouched.
+    $dayEnd = $dayStart->add(new DateInterval('P1D'));
+
+    $stmt = db()->prepare(
+        'SELECT window_start_utc, window_end_utc, energy_delta_kwh
+        FROM meter_aggregates
+        WHERE meter_id = :meter_id
+        AND window_start_utc >= :day_start
+        AND window_start_utc <  :day_end
+        ORDER BY window_start_utc'   // chronological — the contract's order,
+                                    // decided by the SERVER, not left to
+                                    // whatever the storage engine returns
+    );
+    $stmt->execute([
+        // The DB stores "Y-m-d H:i:s" in UTC (our convention, decision #6),
+        // so we format the boundaries the same way. Because the format is
+        // fixed-width with big units first (year..second), STRING comparison
+        // in SQL equals TIME comparison — same trick as in ingest validation.
+        ':meter_id'  => $meterId,
+        ':day_start' => $dayStart->format('Y-m-d H:i:s'),
+        ':day_end'   => $dayEnd->format('Y-m-d H:i:s'),
+    ]);
+
+
+    // ── Convert DB rows to contract slots ────────────────────────────────────
+    // Boundary conversion, outbound direction: storage format -> wire format.
+    // (format_utc_atom() lives in api-helper.php, right next to its inbound
+    // twin parse_utc_datetime() — same boundary, opposite arrows.)
+    $slots = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $slots[] = [
+            // "2026-07-12 10:00:00" -> "2026-07-12T10:00:00+00:00"
+            // ISO 8601 with explicit offset: self-describing, no client ever
+            // guesses a timezone. Same style as ESIT.
+            'start_timestamp' => format_utc_atom($row['window_start_utc']),
+            'end_timestamp'   => format_utc_atom($row['window_end_utc']),
+
+            // PDO hands DECIMAL columns to PHP as STRINGS ("0.100000") —
+            // deliberately, so exactness survives the trip (a float can't
+            // hold every decimal). We cast to float at the LAST moment so
+            // json_encode emits a number (0.1), not a quoted string.
+            'value'           => (float) $row['energy_delta_kwh'],
+
+            // These are MEASURED ENERGY amounts -> kWh. Not CHF/kWh: prices
+            // don't exist yet — that's the future price engine's endpoint.
+            // Honest units beat symmetry with ESIT.
+            'unit'            => 'kWh',
+        ];
+    }
+
+} catch (Throwable $error) {
+    /*
+     * PDO query failures arrive as PDOException. Connection failures arrive
+     * as the generic RuntimeException created by db(). Catching Throwable at
+     * this HTTP boundary guarantees that unexpected read-side failures still
+     * follow the JSON API contract.
+     */
+    error_log('api-v1.php read failed: ' . $error->getMessage());
+
+    /*
+     * Never expose database hosts, schema names, SQL, or stack traces to the
+     * API client. Detailed information remains in the server log.
+     */
+    respond(500, ['error' => 'Internal server error.']);
 }
-
-// ── Fetch the day's slots ────────────────────────────────────────────────
-// The day is a HALF-OPEN interval: [ dayStart, dayStart + 1 day )
-//   window_start_utc >= 00:00 of the day    (>=  : midnight included)
-//   window_start_utc <  00:00 of NEXT day   (<   : next midnight excluded)
-//
-// Why "< nextDay" and not "<= 23:59:59"? Because between 23:59:59 and
-// 00:00:00 there is an infinity of moments (23:59:59.5 ...) that a
-// closed interval silently loses. Half-open intervals mean every moment
-// belongs to EXACTLY one day: no gaps, no double counting. Our windows
-// already work this way (10:00–10:15, then 10:15–10:30: the instant
-// 10:15 belongs to the second window).
-//
-// P1D = ISO 8601 duration: P(eriod) 1 D(ay). Immutable ->add() returns
-// a NEW object; $dayStart itself is untouched.
-$dayEnd = $dayStart->add(new DateInterval('P1D'));
-
-$stmt = db()->prepare(
-    'SELECT window_start_utc, window_end_utc, energy_delta_kwh
-     FROM meter_aggregates
-     WHERE meter_id = :meter_id
-       AND window_start_utc >= :day_start
-       AND window_start_utc <  :day_end
-     ORDER BY window_start_utc'   // chronological — the contract's order,
-                                  // decided by the SERVER, not left to
-                                  // whatever the storage engine returns
-);
-$stmt->execute([
-    // The DB stores "Y-m-d H:i:s" in UTC (our convention, decision #6),
-    // so we format the boundaries the same way. Because the format is
-    // fixed-width with big units first (year..second), STRING comparison
-    // in SQL equals TIME comparison — same trick as in ingest validation.
-    ':meter_id'  => $meterId,
-    ':day_start' => $dayStart->format('Y-m-d H:i:s'),
-    ':day_end'   => $dayEnd->format('Y-m-d H:i:s'),
-]);
-
-
-// ── Convert DB rows to contract slots ────────────────────────────────────
-// Boundary conversion, outbound direction: storage format -> wire format.
-// (format_utc_atom() lives in api-helper.php, right next to its inbound
-// twin parse_utc_datetime() — same boundary, opposite arrows.)
-$slots = [];
-foreach ($stmt->fetchAll() as $row) {
-    $slots[] = [
-        // "2026-07-12 10:00:00" -> "2026-07-12T10:00:00+00:00"
-        // ISO 8601 with explicit offset: self-describing, no client ever
-        // guesses a timezone. Same style as ESIT.
-        'start_timestamp' => format_utc_atom($row['window_start_utc']),
-        'end_timestamp'   => format_utc_atom($row['window_end_utc']),
-
-        // PDO hands DECIMAL columns to PHP as STRINGS ("0.100000") —
-        // deliberately, so exactness survives the trip (a float can't
-        // hold every decimal). We cast to float at the LAST moment so
-        // json_encode emits a number (0.1), not a quoted string.
-        'value'           => (float) $row['energy_delta_kwh'],
-
-        // These are MEASURED ENERGY amounts -> kWh. Not CHF/kWh: prices
-        // don't exist yet — that's the future price engine's endpoint.
-        // Honest units beat symmetry with ESIT.
-        'unit'            => 'kWh',
-    ];
-}
-
 // ── The response ─────────────────────────────────────────────────────────
 respond(200, [
     'meter_id'           => $meterId,
