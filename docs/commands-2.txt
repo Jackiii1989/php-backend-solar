@@ -70,3 +70,8 @@ php -r "require 'src/config.php'; echo 'read=', config_positive_int('RATE_LIMIT_
 
 
 # test 2 on server
+
+$TOKEN = "test123"
+$BASE  = "https://optimasolar-freiamt.ch"
+$BODY  = '{"meter_id":"mock-meter-001","window_start_utc":"2026-07-27T13:45:00+00:00","window_end_utc":"2026-07-27T14:00:00+00:00","energy_delta_kwh":0.125}'
+curl.exe -i -X POST "$BASE/ingest.php" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d ($BODY -replace '"', '\"')
