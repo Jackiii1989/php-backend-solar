@@ -66,3 +66,7 @@ $env:RATE_LIMIT_TEST_BUCKET = "helper-test-" + [guid]::NewGuid()
 
 
 php -r "require 'src/config.php'; echo 'read=', config_positive_int('RATE_LIMIT_API_V1_MAX_REQUESTS', 60), PHP_EOL, 'ingest=', config_positive_int('RATE_LIMIT_INGEST_MAX_REQUESTS', 20), PHP_EOL, 'window=', config_positive_int('RATE_LIMIT_WINDOW_SECONDS', 60), PHP_EOL;"
+
+
+
+# test 2 on server
