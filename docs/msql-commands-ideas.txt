@@ -1,0 +1,15 @@
+SQL execute:
+
+# repair the table
+REPAIR TABLE mysql.db;
+
+# check if it is repaired
+CHECK TABLE mysql.db MEDIUM;
+
+# check if the php code works now:
+php -r "require 'src/db.php'; echo db()->query('SELECT 1')->fetchColumn(), PHP_EOL;"
+
+# check the devices tables:
+DESCRIBE devices;
+
+php -r "require 'src/db.php'; print_r(db_fetch_all('SELECT device_id, name FROM devices'));"

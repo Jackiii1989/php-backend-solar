@@ -1,735 +1,233 @@
-# Raspberry Pi 4 IoT Metering Project — Description and Requirements
+# PHP Backend for IoT Metering — Project Plan
 
-## Project goal
-
-I am building an IoT metering project on a Raspberry Pi 4 running Raspberry Pi OS Trixie.
-
-The Raspberry Pi should read energy counters from one or more energy meters using **Modbus TCP**. The data should be stored locally first, so that measurements are not lost if the device restarts or if the internet connection is unavailable.
-
-For now, the hardware meters are not available, so the project should support mocked/demo readings during development. However, the real communication method in production will always be **Modbus TCP**.
-
-I want to learn the project step by step and understand the design decisions, not just copy a final solution.
+This is the server-side counterpart to the Raspberry Pi metering project
+(see `doc/raspberry_pi_iot_metering_project_requirements.md` and
+`doc/architecture-decision.md`). It receives meter readings over HTTPS
+from the Pi's `push_to_cloud.py` and displays them on a web dashboard.
 
 ---
 
-## Main requirements
+## Decisions
 
-The system should:
-
-1. Run on a Raspberry Pi 4 with Raspberry Pi OS Trixie.
-2. Be implemented in Python.
-3. Use `uv` as the Python project and dependency manager.
-4. Store code in one project folder, for example:
-
-   ```text
-   /home/user/IoT-metering
-   ```
-
-5. Read all enabled meters every minute.
-6. Store successful meter readings persistently in a local SQLite database.
-7. Support more than one meter.
-8. Store meter configuration in the database.
-9. Every 15 minutes, calculate aggregated values from the raw readings.
-10. Send the aggregated values to a REST API using HTTP POST.
-11. Also save the calculated aggregate locally before sending it to the server.
-12. Log program output and errors so they are visible with `journalctl`.
-13. Keep the design simple at first and grow it step by step.
+- **Purpose of "shows it on the screen"**: a web dashboard in the browser.
+- **Where it runs**: a separate server from the Raspberry Pi.
+- **Stack**: PHP (no framework, no Composer dependencies needed for v1).
+- **Database**: MySQL/MariaDB.
+- **Persistence**: store every received reading in SQL, so the dashboard
+  can show history and survive restarts.
+- **Location**: separate project folder, independent of the `IoT-metering`
+  Pi repo.
+- **Auth**: Bearer token. The Pi sends `Authorization: Bearer <token>`;
+  the backend checks it against a secret configured via `.env`.
 
 ---
 
-## Important design decisions
-
-### Local storage first
-
-The Raspberry Pi should first save values locally before sending anything over the internet.
-
-Reason:
+## Project skeleton
 
 ```text
-meter read succeeds
-    ↓
-save locally in SQLite
-    ↓
-later aggregate
-    ↓
-send to REST API
-```
-
-This avoids losing data when:
-
-- the server is down,
-- the internet connection is unavailable,
-- the Raspberry Pi reboots,
-- the upload fails.
-
----
-
-### SQLite database
-
-Use SQLite as the local persistent database.
-
-Reasons:
-
-- simple local file-based database,
-- no separate database server needed,
-- good fit for small IoT edge devices,
-- easy to inspect with the `sqlite3` command-line tool,
-- supports SQL queries for time windows and meter IDs,
-- more reliable and structured than CSV or JSON files for this use case.
-
----
-
-### Multiple meters
-
-The system should not hardcode only one meter.
-
-Instead, the database should contain a `meters` table. The poller should query all enabled meters and read each one.
-
-Concept:
-
-```text
-meters table
-    ↓
-SELECT all enabled meters
-    ↓
-for each meter:
-    read value
-    save successful reading
+IoT-metering-backend/
+├── .env              (secrets — DB creds + API token, never commit)
+├── .gitignore        (ignore .env)
+├── src/
+│   ├── config.php    (loads .env, defines DB + token config)
+│   └── db.php        (PDO connection helper)
+├── public/           (web root / DocumentRoot)
+│   ├── index.php      (dashboard page)
+│   └── ingest.php     (POST endpoint the Pi calls)
+└── db/
+    └── schema.sql     (MySQL table definitions)
 ```
 
 ---
 
-### Modbus TCP only
-
-The production communication method will always be Modbus TCP.
-
-Therefore, a `protocol` column is not required for now.
-
-The meter table should eventually store Modbus TCP connection basics directly, such as:
-
-- host/IP address,
-- port,
-- unit ID / slave ID.
-
-Mocking is only for development and should not pollute the real meter schema with mock-specific columns such as `mock_min_power_w` or `mock_start_energy_kwh`.
-
-> **Current status (main branch):** the `meters` table currently stores a
-> single generic `address TEXT` column (e.g. `mock://mock-meter-001` for
-> mock meters, or a bare IP like `192.168.1.103`) instead of separate
-> `host` / `port` / `unit_id` columns. This was fine while every meter is
-> mocked, but it does **not** yet match the design above. Before wiring up
-> a real Modbus TCP reader (learning step 13), the `meters` table needs a
-> migration to split `address` into `host`, `port`, and `unit_id` columns.
-> Flagging this now so it isn't forgotten later.
-
----
-
-### Error handling
-
-The database should store successful meter readings only.
-
-Failed meter reads should be:
-
-- logged locally through Python logging,
-- visible through `journalctl`,
-- optionally propagated to the server,
-- not stored in the main measurement table.
-
-The trade-off is accepted:
-
-```text
-Database can answer:
-  "What values were successfully read?"
-
-Database cannot answer:
-  "How many read failures happened?"
-```
-
-Failure events can be sent to the server or handled by logs.
-
----
-
-## Recommended database schema
-
-### Table: `meters`
-
-This table stores the known meters and their Modbus TCP connection information.
-
-```sql
-CREATE TABLE IF NOT EXISTS meters (
-    -- Stable text ID for the meter.
-    --
-    -- Examples:
-    --   main-meter
-    --   heat-pump-meter
-    --   apartment-01-meter
-    meter_id TEXT PRIMARY KEY,
-
-    -- Human-readable name for dashboards, logs and debugging.
-    name TEXT NOT NULL,
-
-    -- Optional description.
-    --
-    -- Example:
-    --   "Main building meter in technical room"
-    description TEXT,
-
-    -- Modbus TCP host address.
-    --
-    -- This can be:
-    --   192.168.1.50
-    --   meter-01.local
-    host TEXT NOT NULL,
-
-    -- Modbus TCP default port is 502.
-    port INTEGER NOT NULL DEFAULT 502,
-
-    -- Modbus unit ID, sometimes also called slave ID.
-    --
-    -- Even over TCP this can matter, especially when a gateway is used.
-    unit_id INTEGER NOT NULL DEFAULT 1,
-
-    -- Whether this meter should be read by the poller.
-    --
-    -- 1 = enabled
-    -- 0 = disabled
-    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-
-    -- Timestamp when this meter record was created.
-    created_at_utc TEXT NOT NULL,
-
-    -- Timestamp when this meter record was last updated.
-    updated_at_utc TEXT NOT NULL
-);
-```
-
-> **Current schema (main branch, as actually implemented in
-> `utility/db_meters.py`)** — simpler than the target above, since only
-> mock meters exist so far:
->
-> ```sql
-> CREATE TABLE IF NOT EXISTS meters (
->     meter_id TEXT PRIMARY KEY,
->     name TEXT NOT NULL,
->     address TEXT NOT NULL,   -- generic: "mock://meter-001" or a bare IP
->     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
->     created_at_utc TEXT NOT NULL,
->     updated_at_utc TEXT NOT NULL
-> );
-> ```
->
-> No `description`, `host`, `port`, or `unit_id` columns yet. See the note
-> under "Modbus TCP only" above.
-
----
-
-### Table: `meter_readings`
-
-This table stores successful raw meter readings.
-
-Each row represents one successful reading from one meter.
+## Database schema (`db/schema.sql`)
 
 ```sql
 CREATE TABLE IF NOT EXISTS meter_readings (
-    -- Internal database ID for this reading.
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-    -- UTC timestamp when the value was measured.
-    --
-    -- Example:
-    --   2026-06-27T20:15:00+00:00
-    ts_utc TEXT NOT NULL,
-
-    -- Which meter this reading belongs to.
-    meter_id TEXT NOT NULL,
-
-    -- Cumulative energy counter in kWh.
-    --
-    -- A real meter usually reports a total/cumulative counter:
-    --   1000.000
-    --   1000.015
-    --   1000.031
-    --
-    -- Consumption is calculated later using:
-    --   last_energy_kwh - first_energy_kwh
-    energy_kwh REAL NOT NULL CHECK (energy_kwh >= 0),
-
-    -- Optional instantaneous power in watts.
-    --
-    -- NULL is allowed because not every meter provides this.
-    power_w REAL CHECK (power_w IS NULL OR power_w >= 0),
-
-    -- Relationship to the meters table.
-    --
-    -- This prevents inserting readings for unknown meters.
-    FOREIGN KEY (meter_id)
-        REFERENCES meters(meter_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    device_id VARCHAR(100) NOT NULL,
+    meter_id VARCHAR(100) NOT NULL,
+    ts_utc DATETIME NOT NULL,
+    energy_consumption_now_kwh DECIMAL(12,6) NOT NULL,
+    energy_consumption_last_kwh DECIMAL(12,6) NULL,
+    energy_consumption_delta_kwh DECIMAL(12,6) NOT NULL,
+    received_at_utc DATETIME NOT NULL,
+    UNIQUE KEY uq_device_meter_ts (device_id, meter_id, ts_utc)
 );
 ```
 
-> **Current schema (main branch):** matches the above, except the actual
-> `utility/db_meters.py` version omits the `CHECK (energy_kwh >= 0)` and
-> `CHECK (power_w IS NULL OR power_w >= 0)` constraints. Worth adding back
-> later — right now nothing stops a negative value from being inserted.
+`energy_consumption_last_kwh` is nullable — a meter's very first reading
+has no previous value, and the Pi sends JSON `null` for it in that case.
+
+**Why the `UNIQUE KEY` exists:** its primary purpose is *correctness*, not
+query speed. `(device_id, meter_id, ts_utc)` is the natural, unique
+identity of "this specific reading from this specific meter on this
+specific device." If the Pi retries a POST, this constraint makes the
+retried insert fail harmlessly instead of creating a duplicate row.
+"Insert and let the DB reject the dupe" is the idempotency strategy.
+
+**What it costs:** a `UNIQUE KEY` is a secondary index — its own B-tree,
+separate from the `id` primary key's clustered index, storing the indexed
+columns plus a pointer back to `id`. Every insert has to check it for a
+match and write a new entry, on top of writing the row itself. At this
+project's write volume (well under one row per meter per minute), that
+cost is microseconds and irrelevant. It would only start to matter at
+genuinely high write throughput (thousands of inserts/sec), which this
+system never approaches.
 
 ---
 
-### Index for faster time-window queries
+## Config + DB connection
 
-The aggregator will often query:
+- `src/config.php` reads `.env` (`DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASS`,
+  `API_TOKEN`).
+- `src/db.php` opens a `PDO` connection:
+  `mysql:host=...;dbname=...;charset=utf8mb4` with
+  `PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION`.
+
+`.env` should never be committed and should have restricted permissions
+(`chmod 600 .env`), same as the Pi side.
+
+---
+
+## Ingest endpoint (`public/ingest.php`)
+
+1. Reject anything but `POST` → `405`.
+2. Read `Authorization: Bearer <token>` header, compare against `API_TOKEN`
+   using `hash_equals()` → `401` if missing/wrong.
+3. `json_decode(file_get_contents('php://input'), true)`.
+4. Validate required fields are present and the right type → `400` if not.
+5. Insert into `meter_readings`. Catch the duplicate-key error and return
+   `200 OK` ("already recorded") instead of `500`.
+6. On a fresh insert, return `201 Created`.
+
+### Request payload
+
+Sent by `push_to_cloud.py`'s `convert_to_payload_to_json()`:
+
+```json
+{
+  "device_id": "mock-meter-001",
+  "ts_utc": "2026-08-02T10:00:00+00:00",
+  "meter_id": "mock-meter-001",
+  "energy_consumption_last_kwh": 1000.0,
+  "energy_consumption_now_kwh": 1000.42,
+  "energy_consumption_delta_kwh": 0.42
+}
+```
+
+Handling notes:
+- `energy_consumption_last_kwh` may arrive as JSON `null` for a meter's
+  first-ever reading — bind it as SQL `NULL`, don't coerce to `0`.
+- The `UNIQUE KEY` on `(device_id, meter_id, ts_utc)` is the entire dedup
+  mechanism — there is no separate idempotency key field in the payload.
+- The backend adds its own `received_at_utc`.
+- Timestamps arrive as ISO 8601 with `+00:00`; convert to MySQL DATETIME
+  (strip the offset after confirming it's UTC).
+
+`push_to_cloud.py` (the Pi-side uploader) currently has known bugs in how
+it records upload success/failure — see the main README's Known Issues.
+It doesn't yet reliably mark a reading as uploaded or track failed
+attempts, so don't assume the Pi will cleanly avoid re-sending a reading
+it already delivered. The `UNIQUE KEY` here is doing real, load-bearing
+work, not just defensive belt-and-suspenders.
+
+---
+
+## Dashboard (`public/index.php`)
+
+Query the latest row per `meter_id`:
 
 ```sql
-SELECT *
-FROM meter_readings
-WHERE meter_id = ?
-  AND ts_utc >= ?
-  AND ts_utc < ?
-ORDER BY ts_utc;
+SELECT mr.*
+FROM meter_readings mr
+INNER JOIN (
+    SELECT meter_id, MAX(ts_utc) AS max_ts
+    FROM meter_readings
+    GROUP BY meter_id
+) latest
+  ON mr.meter_id = latest.meter_id AND mr.ts_utc = latest.max_ts
+ORDER BY mr.meter_id;
 ```
 
-Therefore, create an index:
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_meter_readings_meter_ts
-ON meter_readings(meter_id, ts_utc);
-```
-
-Reason:
-
-- faster queries by meter and time,
-- useful for 15-minute aggregation,
-- small write overhead is acceptable because the write rate is low.
+Render as an HTML table. Add `<meta http-equiv="refresh" content="15">` for
+a simple "live" feel without needing JavaScript.
 
 ---
 
-### Table: `meter_aggregates`
+## Local testing steps
 
-> **Already implemented on main branch**, ahead of `aggregator.py` itself
-> (the schema exists in `utility/db_meters.py`, but no program writes to it
-> yet — see the learning-order status near the end of this document).
-
-This table stores the locally-saved 15-minute aggregate for each meter,
-before/regardless of whether it was successfully uploaded to the REST API.
-
-```sql
-CREATE TABLE IF NOT EXISTS meter_aggregates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    meter_id TEXT NOT NULL,
-    window_start_utc TEXT NOT NULL,
-    window_end_utc TEXT NOT NULL,
-    number_of_readings INTEGER NOT NULL CHECK (number_of_readings >= 0),
-    first_energy_kwh REAL NOT NULL CHECK (first_energy_kwh >= 0),
-    last_energy_kwh REAL NOT NULL CHECK (last_energy_kwh >= 0),
-    energy_delta_kwh REAL NOT NULL CHECK (energy_delta_kwh >= 0),
-    average_power_w REAL NOT NULL CHECK (average_power_w >= 0),
-    created_at_utc TEXT NOT NULL,
-
-    FOREIGN KEY (meter_id)
-        REFERENCES meters(meter_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    -- Prevents duplicate aggregates if the aggregator ever runs twice for
-    -- the same window. This is also how upload idempotency is enforced —
-    -- see "REST API upload" below and doc/backend_php_project_plan.md.
-    UNIQUE (meter_id, window_start_utc, window_end_utc)
-);
-
-CREATE INDEX IF NOT EXISTS idx_meter_aggregates_meter_window
-ON meter_aggregates(meter_id, window_start_utc, window_end_utc);
-```
+1. Create the DB/user, then load the schema:
+   `mysql -u root -p < db/schema.sql`
+2. Start PHP's built-in dev server from the project root:
+   `php -S 0.0.0.0:8000 -t public`
+3. Send a sample POST:
+   ```bash
+   curl -X POST http://localhost:8000/ingest.php \
+     -H "Authorization: Bearer <token>" \
+     -H "Content-Type: application/json" \
+     -d '{"device_id":"mock-meter-001","ts_utc":"2026-08-02T10:00:00+00:00","meter_id":"mock-meter-001","energy_consumption_last_kwh":1000.0,"energy_consumption_now_kwh":1000.42,"energy_consumption_delta_kwh":0.42}'
+   ```
+   Expect `201` on first call, `200` on a repeat of the exact same call
+   (dedup via the `UNIQUE KEY`).
+4. Open `http://localhost:8000/` in a browser and confirm the row appears.
 
 ---
 
-## Aggregation logic
+## Integration with the Pi side
 
-Every 15 minutes, a second program should read the raw values and calculate an aggregate.
-
-For cumulative energy counters, do not average the `energy_kwh` values directly.
-
-Instead:
+The Pi's uploader is `push_to_cloud.py`. It reads config from
+`config/iot-metering.env` via `EnvironmentFile=` (systemd) or
+`scripts/run_with_env.sh` (manual runs):
 
 ```text
-delta_kWh = last_energy_kWh - first_energy_kWh
+IOT_METERING_API_URL        → production endpoint (not currently read by any code)
+IOT_METERING_API_URL_LOCAL  → Tailscale test address — push_to_cloud.py reads this one
+IOT_METERING_API_TOKEN      → must match the backend's API_TOKEN
+IOT_METERING_DEVICE_ID      → currently mock-meter-001
 ```
 
-For a 15-minute window:
+`push_to_cloud.py` currently has the line reading `IOT_METERING_API_URL`
+commented out and reads `IOT_METERING_API_URL_LOCAL` instead — readings go
+to a local Tailscale test address, not this backend's production URL.
+Once this backend is built and confirmed working, that needs switching
+(either uncomment the production-URL line, or point
+`IOT_METERING_API_URL_LOCAL` here for testing first) — otherwise readings
+keep accumulating locally with `uploaded_at_utc` still `NULL` and never
+reach this server.
 
-```text
-15 minutes = 0.25 hours
-```
-
-Average power can be calculated as:
-
-```text
-avg_power_W = delta_kWh * 1000 / 0.25
-```
-
-Example:
-
-```text
-first_energy_kWh = 1000.000
-last_energy_kWh  = 1000.100
-
-delta_kWh = 0.100
-
-avg_power_W = 0.100 * 1000 / 0.25
-avg_power_W = 400 W
-```
+Modbus TCP itself must stay on the local trusted network and never be
+exposed to the internet — only this REST API crosses that boundary
+(planned network split: meters on isolated eth0, internet via wlan0 — not
+yet executed, see the main README).
 
 ---
 
-## REST API upload
-
-The aggregator should:
-
-1. calculate the 15-minute aggregate,
-2. save it locally,
-3. send it to the REST API using HTTP POST,
-4. include an idempotency key.
-
-Example idempotency key:
-
-```text
-meter_id:window_start_utc:window_end_utc
-```
-
-Example:
-
-```text
-main-meter:2026-06-27T10:00:00+00:00:2026-06-27T10:15:00+00:00
-```
-
-This allows the server to detect duplicate uploads if the Raspberry Pi retries.
-
-> **Backend design decided (not yet built on the Pi side):** the receiving
-> server is a separate PHP + MySQL project — see
-> `doc/backend_php_project_plan.md` for the full design. Key points that
-> affect what `aggregator.py` will need to send later:
->
-> - The POST body is the aggregate row itself (`meter_id`,
->   `window_start_utc`, `window_end_utc`, `number_of_readings`,
->   `first_energy_kwh`, `last_energy_kwh`, `energy_delta_kwh`,
->   `average_power_w`) as JSON — there is no separate `idempotency_key`
->   field in the payload. Instead, the backend enforces a
->   `UNIQUE (meter_id, window_start_utc, window_end_utc)` constraint on its
->   own table, so a retried POST with the same window simply fails the
->   insert harmlessly instead of creating a duplicate row. The
->   `meter_id:window_start_utc:window_end_utc` string above is still useful
->   as a human-readable log line, just not as a payload field.
-> - Auth is a Bearer token: `Authorization: Bearer <IOT_API_TOKEN>`.
-> - The endpoint returns `201` for a newly stored aggregate and `200` for
->   one that already existed (both count as a successful upload from the
->   Pi's point of view).
-
----
-
-## Logging
-
-The Python programs should log to stdout/stderr.
-
-When run by systemd, these logs should be visible with:
-
-```bash
-journalctl -u iot-meter-poll.service -f
-journalctl -u iot-meter-aggregate.service -f
-```
-
-No custom log file is required at the beginning.
-
-If a meter read fails:
-
-```text
-failed read
-    ↓
-log error to journalctl
-    ↓
-optionally send error event to server
-    ↓
-do not insert into meter_readings
-```
-
----
-
-## Recommended Python project structure
-
-Keep the project small at first:
-
-```text
-IoT-metering/
-├── pyproject.toml
-├── README.md
-├── data/
-│   └── metering.db
-├── iot_metering/
-│   ├── __init__.py
-│   ├── db.py
-│   ├── init_db.py
-│   ├── poller.py
-│   └── aggregator.py
-└── systemd/
-    ├── iot-meter-poll.service
-    ├── iot-meter-poll.timer
-    ├── iot-meter-aggregate.service
-    └── iot-meter-aggregate.timer
-```
-
-Start with only:
-
-```text
-db.py
-init_db.py
-```
-
-Then add the rest step by step.
-
-> **Current structure (main branch, as actually laid out):**
->
-> ```text
-> IoT-metering/
-> ├── pyproject.toml
-> ├── README.md
-> ├── main.py                   # plays the init_db.py role: creates schema
-> │                             # + demo meters, prints enabled meters
-> ├── poller.py                 # top-level, not inside a package yet
-> ├── utility/
-> │   ├── db_meters.py          # plays the db.py role: connection, schema,
-> │   │                         # all DB helper functions
-> │   └── logging_config.py     # journalctl-friendly logging setup
-> └── data/
->     └── metering.db
-> ```
->
-> Differences from the target layout above:
-> - No `iot_metering/` package yet — `poller.py` and `main.py` are
->   top-level, and DB code lives in `utility/` instead of `iot_metering/`.
-> - No `init_db.py` — `main.py` currently does that job.
-> - No `aggregator.py` yet on `main` (the `meter_aggregates` table schema
->   already exists in `utility/db_meters.py`, but nothing writes to it).
-> - No `systemd/` folder yet — polling is still run manually, not on a
->   timer.
-
----
-
-## `db.py` responsibility
-
-`db.py` should contain:
-
-- database path,
-- SQLite connection function,
-- schema definition,
-- schema initialization function,
-- common database helper functions.
-
-Reason:
-
-All database logic should be in one place.
-
-If database settings need to change later, they should be changed in `db.py`, not in every file.
-
----
-
-## `init_db.py` responsibility
-
-`init_db.py` should:
-
-- open the database,
-- create the schema,
-- insert initial/demo meter rows,
-- be safe to run multiple times.
-
-It should not read meters or perform polling.
-
----
-
-## `poller.py` responsibility
-
-`poller.py` should:
-
-- read all enabled meters from `meters`,
-- read each meter over Modbus TCP,
-- during development, optionally generate mock readings,
-- insert successful readings into `meter_readings`,
-- log errors but not store failed readings in `meter_readings`.
-
-It should be a one-shot program:
-
-```text
-start
-read all enabled meters once
-save readings
-exit
-```
-
-systemd will run it every minute.
-
-> **Current status (main branch):** implemented and working — reads
-> enabled meters, generates a mock reading based on the previous
-> `energy_kwh` value, and inserts it, committing after each meter.
->
-> **Known bug to fix:** the `except Exception:` block in `poller.py`
-> references a variable named `exc` in the log message, but the exception
-> is never bound to that name (it should be `except Exception as exc:`).
-> As written, a failed read raises `NameError` instead of logging the
-> original error — masking the real failure reason.
-
----
-
-## `aggregator.py` responsibility
-
-`aggregator.py` should:
-
-- run every 15 minutes,
-- calculate the last completed 15-minute time window,
-- read raw values from `meter_readings`,
-- calculate `delta_kWh`,
-- calculate average power,
-- save the aggregate locally,
-- send the aggregate to the REST API,
-- log success or failure.
-
-> **Current status (main branch): not yet implemented.** The
-> `meter_aggregates` table it will write to already exists in the schema
-> (see above), but this file doesn't exist on `main` yet. This is the next
-> piece of Pi-side code to build, once the PHP backend
-> (`doc/backend_php_project_plan.md`) is ready to receive uploads.
-
----
-
-## systemd behavior
-
-Use systemd timers instead of an infinite Python loop.
-
-Reason:
-
-```text
-systemd timer
-    ↓
-runs one-shot Python service
-    ↓
-Python exits
-    ↓
-systemd runs it again next time
-```
-
-Advantages:
-
-- easier logs,
-- easier restart behavior,
-- better integration with Raspberry Pi OS,
-- no manual loop and sleep logic,
-- `journalctl` works naturally.
-
----
-
-## Polling timer
-
-The poller should run every minute.
-
-Example timer concept:
-
-```text
-OnCalendar=*-*-* *:*:00
-```
-
----
-
-## Aggregation timer
-
-The aggregator should run every 15 minutes.
-
-Example timer concept:
-
-```text
-OnCalendar=*-*-* *:00/15:30
-```
-
-The 30-second delay gives the poller time to write the latest minute sample.
-
----
-
-## Security requirements
-
-### Modbus TCP
-
-Modbus TCP should stay on the local trusted network.
-
-Do not expose Modbus TCP port 502 to the public internet.
-
-### REST API
-
-REST API communication should use HTTPS.
-
-The API token should not be hardcoded in Python code.
-
-Use environment variables or a protected `.env` file for secrets.
-
-Example:
-
-```text
-IOT_API_URL=https://example.com/api/metering
-IOT_API_TOKEN=secret-token
-```
-
-The `.env` file should have restricted permissions:
-
-```bash
-chmod 600 .env
-```
-
-### Logging
-
-Do not log API tokens or secrets.
-
-Logging meter IDs, timestamps and values is okay.
-
----
-
-## Learning approach
-
-The project should be developed step by step.
-
-Suggested order, with current status on `main`:
-
-```text
-1.  Create uv project.                          [done]
-2.  Create db.py.                               [done — as utility/db_meters.py]
-3.  Create meters table.                        [done]
-4.  Create meter_readings table.                [done]
-5.  Insert demo meters.                         [done — via main.py]
-6.  Read enabled meters from the database.      [done]
-7.  Insert one manual reading.                  [done]
-8.  Generate mock readings.                     [done — in poller.py]
-9.  Poll all enabled meters.                     [done]
-10. Add systemd timer for polling.               [not started]
-11. Add aggregator.                              [not started — schema ready]
-12. Add REST POST upload.                        [backend designed, Pi side
-                                                   not started — see
-                                                   doc/backend_php_project_plan.md]
-13. Replace mock reader with real Modbus TCP.    [not started]
-```
-
-Each step should include:
-
-- explanation,
-- commented code,
-- test command,
-- expected output,
-- short review of what was learned.
-
----
-
-## Current design preferences
-
-Please follow these preferences:
-
-1. Do not put mock-generation fields in the `meters` table.
-2. Do not store failed readings in `meter_readings`.
-3. Communication will always be Modbus TCP in production.
-4. Keep the database schema simple at the beginning.
-5. Use many comments in the code.
-6. Explain why each piece exists.
-7. Push back if a design idea is not logical or may cause problems later.
-8. Prefer learning and understanding over producing a large final code dump.
+## Open items / next steps
+
+- [x] Pi-side uploader exists as `push_to_cloud.py` — implemented, but has
+      known success/failure-tracking bugs (see main README's Known
+      Issues) and currently points at a local test URL, not this backend.
+- [ ] Scaffold the folder structure above.
+- [ ] Write `db/schema.sql` and load it into MySQL.
+- [ ] Write `src/config.php` and `src/db.php`.
+- [ ] Write `public/ingest.php` (auth check, validation, idempotent insert).
+- [ ] Write `public/index.php` (dashboard query + HTML table —
+      remember `htmlspecialchars()` on every output value).
+- [ ] Test locally with `php -S` + `curl` (payload above).
+- [ ] Point the Pi at this backend for real (fix the
+      `IOT_METERING_API_URL`/`_LOCAL` mixup above) and confirm the backlog
+      of unsent readings drains.
+- [ ] Later: deploy behind a real web server (Apache/Nginx) with HTTPS.
+
+## Security review notes
+
+- Stored XSS: escape all dashboard output (`htmlspecialchars`).
+- PDO prepared statements everywhere.
+- `hash_equals()` for the token check; token from `random_bytes(32)`.
+- `display_errors=Off` in production; never echo PDO exceptions.
+- MySQL user for the app: SELECT + INSERT only.
+- `.env` outside the web root, never committed, `chmod 600`.
+- Dashboard needs auth (HTTP Basic at minimum) — energy data reveals
+  occupancy patterns.
+- Limit request body size; validate numeric ranges and timestamps.

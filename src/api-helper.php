@@ -109,8 +109,14 @@ function require_method(string $method): void
  * Call this only AFTER the auth gate: parsing work is done for
  * authenticated callers only — no free CPU for strangers.
  */
-function read_json_body(): array
+function read_json_body(int $maxBytes): array
 {
+
+    if ($maxBytes < 1) {
+        throw new InvalidArgumentException(
+            'The maximum request-body size must be at least one byte.'
+        );
+    }
     // php://input is a read-only pseudo-file containing the RAW bytes of
     // the request body — exactly what the client sent after the headers.
     //
@@ -119,14 +125,48 @@ function read_json_body(): array
     // multipart/form-data). Our Pi sends application/json, which PHP does
     // NOT parse automatically — for JSON, $_POST stays empty and the truth
     // lives in php://input.
-    $raw = file_get_contents('php://input');
+    $rawBody = file_get_contents(
+            'php://input',
+            false,
+            null,
+            0,
+            $maxBytes + 1
+        );
+
+    if ($rawBody === false) {
+        error_log('read_json_body() could not read php://input.');
+
+        respond(500, [
+            'error' => 'Internal server error.',
+        ]);
+    }
+
+    if (strlen($rawBody) > $maxBytes) {
+        respond(413, [
+            'error' => 'Request body exceeds the maximum allowed size.',
+        ]);
+    }
 
     // json_decode turns the JSON text into PHP values.
     // The second argument `true` means: decode JSON objects {...} into
     // associative arrays  ['key' => ...]  instead of stdClass objects
     // ($payload['meter_id'] rather than $payload->meter_id).
-    $payload = json_decode($raw, true);
-
+    try {
+        /*
+         * Decode as an object first. This allows us to distinguish a JSON
+         * object such as {"meter_id":"abc"} from a JSON array such as [].
+         */
+        $decodedBody = json_decode(
+            $rawBody,
+            false,
+            512,
+            JSON_THROW_ON_ERROR
+        );
+    } catch (JsonException $exception) {
+        respond(400, [
+            'error' => 'Request body must contain valid JSON.',
+        ]);
+    }
     // One check, three failure modes:
     //  1. invalid JSON        -> json_decode returns null
     //  2. empty body          -> null as well
@@ -138,14 +178,16 @@ function read_json_body(): array
     // Edge note: the body "null" also decodes to null — indistinguishable
     // from a parse error. We don't care: either way it's not the object
     // the contract demands, and 400 is the right answer.
-    if (!is_array($payload)) {
-        respond(400, ['error' => 'Request body must be a JSON object.']);
+    if (!$decodedBody instanceof stdClass) {
+        respond(400, [
+            'error' => 'Request body must be a JSON object.',
+        ]);
     }
 
     // From here on the endpoint works with a plain PHP array and never
     // thinks about HTTP transport again — that's the whole point of the
     // helper: convert "wire format" to "language values" at the boundary.
-    return $payload;
+    return get_object_vars($decodedBody);
 } 
 
 

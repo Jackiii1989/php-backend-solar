@@ -29,33 +29,70 @@ USE iot_metering;
 -- rebuild them; converting later trips over the FK: error 1833).
 -- Rule learned: defaults are hidden dependencies — pin what matters.
 
-CREATE TABLE IF NOT EXISTS meters (
-	meter_id VARCHAR(100) PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS devices (
+	device_id VARCHAR(100) PRIMARY KEY,
 	name VARCHAR(200) NOT NULL,
 	description TEXT,
-	created_at_utc DATETIME NOT NULL
+	created_at_utc DATETIME NOT NULL,
+	updated_at_utc DATETIME
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- One row per meter per 15-minute window, mirroring the Pi's local database
-CREATE TABLE IF NOT EXISTS meter_aggregates(
+CREATE TABLE IF NOT EXISTS meters (
+	meter_id VARCHAR(100) PRIMARY KEY,
+	device_id VARCHAR(100) NOT NULL,
+	name VARCHAR(200) NOT NULL,
+	description TEXT,
+	created_at_utc DATETIME NOT NULL,
+	updated_at_utc DATETIME,
+
+	/*
+     * This pair represents meter ownership:
+     * the meter belongs to this specific gateway.
+     *
+     * meter_id is already globally unique, but this composite key allows
+     * meter_readings to reference the ownership relationship as one unit.
+     */
+    UNIQUE KEY uq_meters_device_meter (device_id, meter_id),
+
+    CONSTRAINT fk_meters_device
+        FOREIGN KEY (device_id)
+        REFERENCES devices (device_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- One row for every reading received from a registered meter.
+CREATE TABLE IF NOT EXISTS meter_readings(
 	id INT AUTO_INCREMENT PRIMARY KEY,
 	meter_id VARCHAR(100) NOT NULL,
-	window_start_utc DATETIME NOT NULL,
-	window_end_utc DATETIME NOT NULL,
+	device_id VARCHAR(100) NOT NULL,
+	pi_time_utc DATETIME NOT NULL,
+
 	-- exact decimal number: 12 digits total, 6 of them after the decimal point
+	energy_now_kwh DECIMAL(12,6) NOT NULL,
+	energy_last_kwh DECIMAL(12,6) NOT NULL,
 	energy_delta_kwh DECIMAL(12,6) NOT NULL,
-	received_at_utc DATETIME NOT NULL,
+	
+
 	-- with UNIQUE KEY, the database creates an extra internal data structure beside the main table storage.
 	-- The extra structure is a B-tree index.
-	UNIQUE KEY uq_meter_window (meter_id, window_start_utc, window_end_utc),
+
+	UNIQUE KEY uq_meter_readings (device_id, meter_id, pi_time_utc),
+	
 	-- FK columns are ONE logical thing spread over two tables: meter_id here
 	-- must stay byte-for-byte comparable with meters.meter_id — same type,
 	-- same charset, same collation. (That's also why changing such a column
 	-- later means treating both tables as a unit.)
-	FOREIGN KEY (meter_id)
-		REFERENCES meters(meter_id)
-		ON UPDATE CASCADE
-		ON DELETE RESTRICT
+    /*
+     * Reference the ownership pair as one unit. This prevents a registered
+     * gateway from submitting readings for another gateway's meter.
+     */
+    CONSTRAINT fk_meter_readings_meter
+        FOREIGN KEY (device_id, meter_id)
+        REFERENCES meters (device_id, meter_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 --  Why the `UNIQUE KEY` exists — design note:
