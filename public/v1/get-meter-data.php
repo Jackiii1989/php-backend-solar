@@ -21,10 +21,10 @@ declare(strict_types=1);
 // __DIR__ = the folder THIS file lives in (public/), so the paths work no
 // matter where the web server was started from. ../src is OUTSIDE the web
 // root: helpers and config can never be requested directly by a browser.
-require_once __DIR__ . '/../src/config.php'; # function to get the environment variables
-require_once __DIR__ . '/../src/api-helper.php'; # helper api functions
-require_once __DIR__ . '/../src/db.php'; # database functions.
-require_once __DIR__ . '/../src/rate-limit.php'; // shared API rate limiter
+require_once __DIR__ . '/../../src/config.php'; # function to get the environment variables
+require_once __DIR__ . '/../../src/api-helper.php'; # helper api functions
+require_once __DIR__ . '/../../src/db.php'; # database functions.
+require_once __DIR__ . '/../../src/rate-limit.php'; // shared API rate limiter
 
 
 // ── Gate 1: only GET may pass (shared helper — same 405 + Allow header
@@ -39,15 +39,15 @@ require_method('GET');
 // This gate runs before authentication so repeated attempts with missing or
 // incorrect Bearer tokens also consume the request allowance.
 require_rate_limit(
-    'api-v1',
+    'get-meters',
 
     // Maximum read requests per client during one window.
     // The code default remains 60 if the setting is absent.
-    config_positive_int('RATE_LIMIT_API_V1_MAX_REQUESTS', 60),
+    config_positive_int('RATE_LIMIT_API_MAX_REQUESTS', 60),
 
     // Shared duration of one rate-limit window in seconds.
     // The code default remains 60 if the setting is absent.
-    config_positive_int('RATE_LIMIT_WINDOW_SECONDS_API_V1', 60)
+    config_positive_int('RATE_LIMIT_WINDOW_SECONDS_API', 60)
 );
 
 
@@ -88,7 +88,9 @@ if ($dayStart === false || $dayStart->format('Y-m-d') !== $date) {
 // The response declares ONE meter_id, so one meter per request.
 // Default = our only meter, purely for convenience while there's one.
 $meterId = $_GET['meter_id'] ?? '';
-
+if ($meterId === '') {
+    respond(400, ['error' => 'meter_id is required.']);
+}
 
 // The meters table is the allowlist for reads too. Asking for an
 // unregistered meter = asking for a resource that doesn't exist -> 404.
@@ -96,16 +98,25 @@ $meterId = $_GET['meter_id'] ?? '';
 // "please STORE this" — understood but unprocessable. Here it's "please
 // SHOW me X" and there is no X. Different verbs, different semantics.)
 //
+// We also read device_id: the meter belongs to exactly one gateway, and
+// echoing it back saves every client a second lookup.
+//
 // prepare/execute with a placeholder even for this tiny query: the
 // meter_id came from the URL — user input NEVER gets glued into SQL.
 try {
-    $stmt = db()->prepare('SELECT meter_id FROM meters WHERE meter_id = :meter_id');
-    $stmt->execute([':meter_id' => $meterId]);
-    if ($stmt->fetch() === false) {           // no row -> fetch() returns false
+    $meterRows  = db_fetch_all(
+        'SELECT meter_id, device_id, name 
+         FROM meters 
+         WHERE meter_id = :meter_id
+         LIMIT 1',
+         [':meter_id' => $meterId]
+    );
+
+    if ($meterRows === []) {           // no row -> fetch() returns false
         respond(404, ['error' => "Unknown meter_id '{$meterId}'."]);
     }
 
-    // ── Fetch the day's slots ────────────────────────────────────────────────
+    // ── Fetch the day's readings ────────────────────────────────────────────────
     // The day is a HALF-OPEN interval: [ dayStart, dayStart + 1 day )
     //   window_start_utc >= 00:00 of the day    (>=  : midnight included)
     //   window_start_utc <  00:00 of NEXT day   (<   : next midnight excluded)
@@ -121,25 +132,47 @@ try {
     // a NEW object; $dayStart itself is untouched.
     $dayEnd = $dayStart->add(new DateInterval('P1D'));
 
-    $stmt = db()->prepare(
-        'SELECT window_start_utc, window_end_utc, energy_delta_kwh
-        FROM meter_aggregates
+    $readings = db_fetch_all(
+        'SELECT pi_time_utc, energy_now_kwh, energy_delta_kwh
+        FROM meter_readings
         WHERE meter_id = :meter_id
-        AND window_start_utc >= :day_start
-        AND window_start_utc <  :day_end
-        ORDER BY window_start_utc'   // chronological — the contract's order,
+        AND pi_time_utc >= :day_start
+        AND pi_time_utc <  :day_end
+        ORDER BY pi_time_utc',      // chronological — the contract's order,
                                     // decided by the SERVER, not left to
                                     // whatever the storage engine returns
+        [
+            // The DB stores "Y-m-d H:i:s" in UTC (our convention, decision #6),
+            // so we format the boundaries the same way. Because the format is
+            // fixed-width with big units first (year..second), STRING comparison
+            // in SQL equals TIME comparison — same trick as in ingest validation.
+            ':meter_id'  => $meterId,
+            ':day_start' => $dayStart->format('Y-m-d H:i:s'),
+            ':day_end'   => $dayEnd->format('Y-m-d H:i:s'),
+        ]                                
     );
-    $stmt->execute([
-        // The DB stores "Y-m-d H:i:s" in UTC (our convention, decision #6),
-        // so we format the boundaries the same way. Because the format is
-        // fixed-width with big units first (year..second), STRING comparison
-        // in SQL equals TIME comparison — same trick as in ingest validation.
-        ':meter_id'  => $meterId,
-        ':day_start' => $dayStart->format('Y-m-d H:i:s'),
-        ':day_end'   => $dayEnd->format('Y-m-d H:i:s'),
-    ]);
+
+    // The last reading BEFORE this day. Why: energy_delta_kwh means "energy
+    // since the PREVIOUS reading", so a slot's start is the previous
+    // reading's timestamp. For the first reading of the day that predecessor
+    // lies in yesterday — without this lookup the first slot of every day
+    // would silently lose its start.
+    $earlierRows = db_fetch_all(
+        'SELECT pi_time_utc
+         FROM meter_readings
+         WHERE meter_id = :meter_id
+           AND pi_time_utc < :day_start
+         ORDER BY pi_time_utc DESC
+         LIMIT 1',
+        [
+            ':meter_id'  => $meterId,
+            ':day_start' => $dayStart->format('Y-m-d H:i:s'),
+        ]
+    );
+
+    // null when this meter has never reported before that day.
+    $previousTimestamp = $earlierRows[0]['pi_time_utc'] ?? null;
+
 
 
     // ── Convert DB rows to contract slots ────────────────────────────────────
@@ -149,22 +182,29 @@ try {
     $slots = [];
     foreach ($stmt->fetchAll() as $row) {
         $slots[] = [
+            // null for the very first slot of a meter's history: there is
+            // no earlier reading, so the interval genuinely has no start.
+            // Honest null beats an invented timestamp.
+            'start_timestamp' => $previousTimestamp === null
+                ? null
+                : format_utc_atom($previousTimestamp),
+
             // "2026-07-12 10:00:00" -> "2026-07-12T10:00:00+00:00"
             // ISO 8601 with explicit offset: self-describing, no client ever
-            // guesses a timezone. Same style as ESIT.
-            'start_timestamp' => format_utc_atom($row['window_start_utc']),
-            'end_timestamp'   => format_utc_atom($row['window_end_utc']),
+            // has to guess a timezone. Same style as ESIT.
+            'end_timestamp'   => format_utc_atom($row['pi_time_utc']),
 
-            // PDO hands DECIMAL columns to PHP as STRINGS ("0.100000") —
-            // deliberately, so exactness survives the trip (a float can't
-            // hold every decimal). We cast to float at the LAST moment so
-            // json_encode emits a number (0.1), not a quoted string.
-            'value'           => (float) $row['energy_delta_kwh'],
+            // PDO hands DECIMAL columns to PHP as STRINGS ("0.100000") so
+            // exactness survives the trip. Cast to float at the LAST moment
+            // so json_encode emits a number (0.1), not a quoted string.
+            'delta_kwh'           => (float) $row['energy_delta_kwh'],
 
-            // These are MEASURED ENERGY amounts -> kWh. Not CHF/kWh: prices
-            // don't exist yet — that's the future price engine's endpoint.
-            // Honest units beat symmetry with ESIT.
-            'unit'            => 'kWh',
+            // The cumulative counter at that moment — the raw meter face
+            // value. Lets a client verify deltas or draw the counter curve.
+            'now_kwh'               => (float) $row['energy_now_kwh'],
+
+            'previous_kwh'               => (float) $row['energy_last_kwh'],
+
         ];
     }
 
@@ -175,7 +215,7 @@ try {
      * this HTTP boundary guarantees that unexpected read-side failures still
      * follow the JSON API contract.
      */
-    error_log('api-v1.php read failed: ' . $error->getMessage());
+    error_log('meter-readings.php read failed: ' . $error->getMessage());
 
     /*
      * Never expose database hosts, schema names, SQL, or stack traces to the
@@ -187,7 +227,6 @@ try {
 respond(200, [
     'meter_id'           => $meterId,
     'date'               => $date,
-    'resolution_minutes' => 15,
     //'unit'  			 => 'CHF/kWh',
     'unit'  			 => 'kWh',
 
