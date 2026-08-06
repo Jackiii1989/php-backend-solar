@@ -180,7 +180,7 @@ async function loadDashboard() {
          * The API token is deliberately not included in this URL.
          */
         const requestUrl = new URL(
-            'api-v1.php',
+            'v1/get-meter-data.php',
             window.location.href
         );
 

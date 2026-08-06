@@ -150,7 +150,7 @@ function e(string $s): string
 <table>
     <tr><th>Endpoint</th><th>Method</th><th>Auth</th><th>Purpose</th></tr>
     <tr>
-        <td><code>/api-v1.php?date=YYYY-MM-DD</code></td>
+        <td><code>/get-meter-data.php?date=YYYY-MM-DD</code></td>
         <td>GET</td>
         <td>Bearer token</td>
         <td>15-minute price slots (mock data for now)</td>

@@ -62,7 +62,7 @@ require_rate_limit(
 // "?? ''" (null coalescing) substitutes an empty string — the function
 // always receives a real string, and "missing" flows into the normal
 // comparison as a failed match.
-require_bearer_token($_SERVER['HTTP_AUTHORIZATION'] ?? '', config('API_TOKEN_GET_USAGE'));
+require_bearer_token($_SERVER['HTTP_AUTHORIZATION'] ?? '', config('API_TOKEN_INGEST'));
 
 
 // ── Gate 4: the ?date= query parameter ───────────────────────────────────
