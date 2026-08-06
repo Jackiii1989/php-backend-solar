@@ -1,10 +1,10 @@
 <?php
 
 /**
- * api-v1.php — GET endpoint: one day of 15-minute energy slots, as JSON.
+ * get-meter-data.php — GET endpoint
  *
  * Contract:
- *   GET /api-v1.php?date=YYYY-MM-DD&meter_id=...
+ *   GET /get-meter-data.php?date=YYYY-MM-DD&meter_id=...
  *   Authorization: Bearer <API_TOKEN>
  *
  *   200 day of slots (possibly empty) | 400 bad date | 401 bad token
@@ -105,7 +105,7 @@ if ($meterId === '') {
 // meter_id came from the URL — user input NEVER gets glued into SQL.
 try {
     $meterRows  = db_fetch_all(
-        'SELECT meter_id, device_id, name 
+        'SELECT meter_id
          FROM meters 
          WHERE meter_id = :meter_id
          LIMIT 1',
@@ -133,7 +133,11 @@ try {
     $dayEnd = $dayStart->add(new DateInterval('P1D'));
 
     $readings = db_fetch_all(
-        'SELECT pi_time_utc, energy_now_kwh, energy_delta_kwh
+        'SELECT 
+            pi_time_utc,
+            energy_now_kwh,
+            energy_delta_kwh,
+            energy_last_kwh
         FROM meter_readings
         WHERE meter_id = :meter_id
         AND pi_time_utc >= :day_start
@@ -180,7 +184,7 @@ try {
     // (format_utc_atom() lives in api-helper.php, right next to its inbound
     // twin parse_utc_datetime() — same boundary, opposite arrows.)
     $slots = [];
-    foreach ($stmt->fetchAll() as $row) {
+    foreach ($readings as $row) {
         $slots[] = [
             // null for the very first slot of a meter's history: there is
             // no earlier reading, so the interval genuinely has no start.
@@ -197,15 +201,16 @@ try {
             // PDO hands DECIMAL columns to PHP as STRINGS ("0.100000") so
             // exactness survives the trip. Cast to float at the LAST moment
             // so json_encode emits a number (0.1), not a quoted string.
-            'delta_kwh'           => (float) $row['energy_delta_kwh'],
+            'value'           => (float) $row['energy_delta_kwh'],
 
             // The cumulative counter at that moment — the raw meter face
             // value. Lets a client verify deltas or draw the counter curve.
-            'now_kwh'               => (float) $row['energy_now_kwh'],
-
-            'previous_kwh'               => (float) $row['energy_last_kwh'],
+            'meter_reading_kwh' => (float) $row['energy_now_kwh'],
 
         ];
+
+        // This reading becomes the next slot's start.
+        $previousTimestamp = $row['pi_time_utc'];
     }
 
 } catch (Throwable $error) {
