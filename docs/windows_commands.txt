@@ -56,3 +56,37 @@ php -l public\index.php
 
 #check the function db_fetch_all
 php -r "require 'src/db.php'; print_r(db_fetch_all('SELECT meter_id FROM meters ORDER BY meter_id'));"
+
+
+
+@'
+{"device_id":"pi-001","meter_id":"mock-meter-001","ts_utc":"2026-08-06T01:00:00+00:00","energy_consumption_now_kwh":1000.55,"energy_consumption_last_kwh":1000.4,"energy_consumption_delta_kwh":0.15}
+'@ | Set-Content -Encoding ascii payload.json
+
+curl.exe -i -X POST "http://127.0.0.1:8000/ingest.php" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data-binary "@payload.json"   # 201
+curl.exe -i -X POST "http://127.0.0.1:8000/ingest.php" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data-binary "@payload.json"   # 200 already recorded
+
+# Read it back — the new slot's start_timestamp must be the PREVIOUS reading's time
+curl.exe -s "$B`?date=2026-08-06&meter_id=mock-meter-001" -H "Authorization: Bearer $TOKEN" | ConvertFrom-Json | Select-Object -ExpandProperty slots | Format-Table
+
+
+#######################################################
+
+# One-time: token from .env (currently API_TOKEN_INGEST is what the GET endpoint checks)
+$TOKEN = "test123"
+$B = "http://127.0.0.1:8000/v1/get-meter-data.php"
+
+# Happy path — a day that has readings
+curl.exe -i "$B`?date=2026-08-06&meter_id=mock-meter-001" -H "Authorization: Bearer $TOKEN"
+
+# Edge cases — each should give a DIFFERENT status
+curl.exe -i "$B`?date=2001-01-01&meter_id=mock-meter-001" -H "Authorization: Bearer $TOKEN"   # 200, slots: []
+curl.exe -i "$B`?meter_id=ghost-meter"                    -H "Authorization: Bearer $TOKEN"   # 404
+curl.exe -i "$B`?date=2026-08-06"                         -H "Authorization: Bearer $TOKEN"   # 400 meter_id required
+curl.exe -i "$B`?date=2026-02-31&meter_id=mock-meter-001" -H "Authorization: Bearer $TOKEN"   # 400 bad date
+curl.exe -i "$B`?meter_id=mock-meter-001"                 -H "Authorization: Bearer wrong"    # 401
+curl.exe -i "$B`?meter_id=mock-meter-001"                                                     # 401 (no header)
+curl.exe -i -X POST "$B`?meter_id=mock-meter-001"         -H "Authorization: Bearer $TOKEN"   # 405 + Allow: GET
+
+# Rate limit: 61 quick requests -> the last ones become 429
+1..61 | ForEach-Object { curl.exe -s -o NUL -w "%{http_code} " "$B`?meter_id=mock-meter-001" -H "Authorization: Bearer $TOKEN" }

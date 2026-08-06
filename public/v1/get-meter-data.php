@@ -4,23 +4,29 @@
  * get-meter-data.php — GET endpoint
  *
  * Contract:
- *   GET /get-meter-data.php?date=YYYY-MM-DD&meter_id=...
- *   Authorization: Bearer <API_TOKEN>
+ *   GET /v1/get-meter-data.php?date=YYYY-MM-DD&meter_id=...
+ *   Authorization: Bearer <API_TOKEN_GET_USAGE>
  *
- *   200 day of slots (possibly empty) | 400 bad date | 401 bad token
- *   404 unknown meter                 | 405 wrong verb
- *   429 rate limit exceeded           | 500 unexpected server or database failure
- * 
+ *   200 day of slots (possibly empty) | 400 bad or missing input
+ *   401 bad token                     | 404 unknown meter
+ *   405 wrong verb                    | 429 rate limit exceeded
+ *   500 unexpected server or database failure
+ *
  * This is the read-side twin of ingest.php: what the Pi POSTs in,
  * a client GETs back out — same table, opposite direction.
+ *
+ * Each slot's value is the energy measured BETWEEN two readings, so a
+ * slot spans [previous reading, this reading). The first slot of a day
+ * therefore needs the last reading of the previous day — see the
+ * lookback query below.
  */
 
 declare(strict_types=1);
 
 
-// __DIR__ = the folder THIS file lives in (public/), so the paths work no
-// matter where the web server was started from. ../src is OUTSIDE the web
-// root: helpers and config can never be requested directly by a browser.
+// __DIR__ = the folder THIS file lives in (public/v1), so the paths work
+// no matter where the web server was started from. ../../src is OUTSIDE
+// the web root: helpers and config can never be requested by a browser.
 require_once __DIR__ . '/../../src/config.php'; # function to get the environment variables
 require_once __DIR__ . '/../../src/api-helper.php'; # helper api functions
 require_once __DIR__ . '/../../src/db.php'; # database functions.
@@ -81,12 +87,11 @@ $dayStart = DateTimeImmutable::createFromFormat('!Y-m-d', $date, new DateTimeZon
 if ($dayStart === false || $dayStart->format('Y-m-d') !== $date) {
     respond(400, ['error' => 'date must have the form YYYY-MM-DD.']);
 }
-//print($dayStart->format('Y-m-d H:i:s'));
-//var_dump($dayStart);
 
 // ── Gate 5: which meter? ─────────────────────────────────────────────────
-// The response declares ONE meter_id, so one meter per request.
-// Default = our only meter, purely for convenience while there's one.
+// The response declares ONE meter_id, so one meter per request. There is
+// no default: with several meters, guessing which one the caller meant
+// would be a bug factory.
 $meterId = $_GET['meter_id'] ?? '';
 if ($meterId === '') {
     respond(400, ['error' => 'meter_id is required.']);
@@ -97,8 +102,6 @@ if ($meterId === '') {
 // (Compare ingest's 422 for the same situation: there the request was
 // "please STORE this" — understood but unprocessable. Here it's "please
 // SHOW me X" and there is no X. Different verbs, different semantics.)
-//
-// We also read device_id: the meter belongs to exactly one gateway.
 //
 // prepare/execute with a placeholder even for this tiny query: the
 // meter_id came from the URL — user input NEVER gets glued into SQL.
@@ -111,32 +114,29 @@ try {
          [':meter_id' => $meterId]
     );
 
-    if ($meterRows === []) {           // no row -> fetch() returns false
+    if ($meterRows === []) {           // no matching row -> empty array
         respond(404, ['error' => "Unknown meter_id '{$meterId}'."]);
     }
 
     // ── Fetch the day's readings ────────────────────────────────────────────────
     // The day is a HALF-OPEN interval: [ dayStart, dayStart + 1 day )
-    //   window_start_utc >= 00:00 of the day    (>=  : midnight included)
-    //   window_start_utc <  00:00 of NEXT day   (<   : next midnight excluded)
+    //   pi_time_utc >= 00:00 of the day    (>=  : midnight included)
+    //   pi_time_utc <  00:00 of NEXT day   (<   : next midnight excluded)
     //
     // Why "< nextDay" and not "<= 23:59:59"? Because between 23:59:59 and
     // 00:00:00 there is an infinity of moments (23:59:59.5 ...) that a
     // closed interval silently loses. Half-open intervals mean every moment
-    // belongs to EXACTLY one day: no gaps, no double counting. Our windows
-    // already work this way (10:00–10:15, then 10:15–10:30: the instant
-    // 10:15 belongs to the second window).
+    // belongs to EXACTLY one day: no gaps, no double counting.
     //
     // P1D = ISO 8601 duration: P(eriod) 1 D(ay). Immutable ->add() returns
     // a NEW object; $dayStart itself is untouched.
     $dayEnd = $dayStart->add(new DateInterval('P1D'));
 
     $readings = db_fetch_all(
-        'SELECT 
+        'SELECT
             pi_time_utc,
             energy_now_kwh,
-            energy_delta_kwh,
-            energy_last_kwh
+            energy_delta_kwh
         FROM meter_readings
         WHERE meter_id = :meter_id
         AND pi_time_utc >= :day_start
@@ -180,8 +180,9 @@ try {
 
     // ── Convert DB rows to contract slots ────────────────────────────────────
     // Boundary conversion, outbound direction: storage format -> wire format.
-    // (format_utc_atom() lives in api-helper.php, right next to its inbound
-    // twin parse_utc_datetime() — same boundary, opposite arrows.)
+    // (format_utc_atom() lives in api-helper.php; its inbound twin
+    // parse_utc_datetime() lives in ingest.php — same boundary, opposite
+    // arrows.)
     $slots = [];
     foreach ($readings as $row) {
         $slots[] = [
@@ -219,7 +220,7 @@ try {
      * this HTTP boundary guarantees that unexpected read-side failures still
      * follow the JSON API contract.
      */
-    error_log('meter-readings.php read failed: ' . $error->getMessage());
+    error_log('get-meter-data.php read failed: ' . $error->getMessage());
 
     /*
      * Never expose database hosts, schema names, SQL, or stack traces to the
