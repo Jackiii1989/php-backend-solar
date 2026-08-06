@@ -98,8 +98,7 @@ if ($meterId === '') {
 // "please STORE this" — understood but unprocessable. Here it's "please
 // SHOW me X" and there is no X. Different verbs, different semantics.)
 //
-// We also read device_id: the meter belongs to exactly one gateway, and
-// echoing it back saves every client a second lookup.
+// We also read device_id: the meter belongs to exactly one gateway.
 //
 // prepare/execute with a placeholder even for this tiny query: the
 // meter_id came from the URL — user input NEVER gets glued into SQL.
