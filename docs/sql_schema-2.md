@@ -27,5 +27,14 @@ CREATE TABLE meter_aggregates (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Re-register the meter (the DROP took it along if it existed).
-INSERT INTO meters (meter_id, name, description, created_at_utc)
-VALUES ('mock-meter-001', 'Mock meter', 'Development test meter', UTC_TIMESTAMP()
+INSERT INTO meters (meter_id, device_id, name, description, created_at_utc, updated_at_utc)
+VALUES (
+    'mock-meter-002',            -- meter_id: your identifier, must be globally unique
+    'gateway-001-abcd1234',      -- device_id: must already exist in devices
+    'Mock meter 2',              -- name: NOT NULL, human-readable
+    'Development test meter',    -- description: may be NULL
+    UTC_TIMESTAMP(),             -- created_at_utc: UTC, matching every other timestamp in the schema
+    NULL                         -- updated_at_utc: NULL until the row is first changed
+);
+
+

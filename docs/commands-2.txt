@@ -75,3 +75,18 @@ $TOKEN = "test123"
 $BASE  = "https://optimasolar-freiamt.ch"
 $BODY  = '{"meter_id":"mock-meter-001","window_start_utc":"2026-07-27T13:45:00+00:00","window_end_utc":"2026-07-27T14:00:00+00:00","energy_delta_kwh":0.125}'
 curl.exe -i -X POST "$BASE/ingest.php" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d ($BODY -replace '"', '\"')
+
+$TOKEN = "test123"
+
+@'
+{
+  "device_id": "gateway-001-abcd1234",
+  "meter_id": "mock-meter-002",
+  "ts_utc": "2026-08-07T10:00:00+00:00",
+  "energy_consumption_now_kwh": 12.5,
+  "energy_consumption_last_kwh": 12.4,
+  "energy_consumption_delta_kwh": 0.1
+}
+'@ | Set-Content -Encoding ascii payload.json
+
+curl.exe -i -X POST "http://127.0.0.1:8000/ingest.php" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data-binary "@payload.json"

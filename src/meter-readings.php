@@ -90,3 +90,24 @@ function fetch_meter_slots(
 
     return $slots;
 }
+
+/**
+ * Every registered meter, for the picker on the graph page.
+ *
+ * ORDER BY is not cosmetic here: the client assigns each meter a colour
+ * from its POSITION in this list, so the order must be the same on every
+ * request. name can repeat between meters, so meter_id (the primary key,
+ * therefore unique) breaks ties and makes the order total.
+ *
+ * Test: php -r "require 'src/meter-readings.php'; print_r(fetch_meters());"
+ * 
+ * @return array<int, array<string, mixed>>
+ */
+function fetch_meters(): array
+{
+    return db_fetch_all(
+        'SELECT meter_id, name, description
+         FROM meters
+         ORDER BY name, meter_id'
+    );
+}
