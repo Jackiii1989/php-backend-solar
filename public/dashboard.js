@@ -77,11 +77,15 @@ function renderSlots(slots) {
             slot.end_timestamp ?? ''
         );
 
-        const energyCell = createTextCell(
-            `${slot.value ?? ''} ${slot.unit ?? 'kWh'}`
+        const energyDeltaCell = createTextCell(
+            `${slot.meter_reading_delta_kwh ?? ''} ${slot.unit ?? 'kWh'}`
         );
 
-        row.append(startCell, endCell, energyCell);
+        const energyNowCell = createTextCell(
+            `${slot.meter_reading_now_kwh ?? ''} ${slot.unit ?? 'kWh'}`
+        );
+
+        row.append(startCell, endCell, energyNowCell, energyDeltaCell);
         slotsElement.append(row);
     }
 

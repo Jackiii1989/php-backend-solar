@@ -123,7 +123,8 @@ function e(string $s): string
         <tr>
             <th>Start (UTC)</th>
             <th>End (UTC)</th>
-            <th>Energy</th>
+            <th>Energy now</th>
+            <th>Energy delta</th>
         </tr>
     </thead>
 

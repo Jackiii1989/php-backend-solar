@@ -201,11 +201,11 @@ try {
             // PDO hands DECIMAL columns to PHP as STRINGS ("0.100000") so
             // exactness survives the trip. Cast to float at the LAST moment
             // so json_encode emits a number (0.1), not a quoted string.
-            'value'           => (float) $row['energy_delta_kwh'],
+            'meter_reading_delta_kwh'           => (float) $row['energy_delta_kwh'],
 
             // The cumulative counter at that moment — the raw meter face
             // value. Lets a client verify deltas or draw the counter curve.
-            'meter_reading_kwh' => (float) $row['energy_now_kwh'],
+            'meter_reading_now_kwh' => (float) $row['energy_now_kwh'],
 
         ];
 
