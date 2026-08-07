@@ -46,7 +46,7 @@ require_rate_limit(
 // the client's allowance.
 require_bearer_token(
     $_SERVER['HTTP_AUTHORIZATION'] ?? '',
-    config('API_TOKEN_GET_USAGE')
+    config('API_TOKEN_INGEST')
 );
 
 

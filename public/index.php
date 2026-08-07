@@ -2,8 +2,52 @@
 
 declare(strict_types=1);
 
-
 require_once __DIR__ . '/../src/db.php';
+require_once __DIR__ . '/../src/session.php';
+require_once __DIR__ . '/../src/rate-limit.php';
+$loginError = '';
+
+// ── Sign out: ?logout=1 ─────────────────────────────────────────────────
+// A GET that changes state isn't ideal in principle (a link prefetcher
+// could trigger it), but for logout the worst case is a harmless
+// inconvenience, and it saves a whole file.
+if (isset($_GET['logout'])) {
+    log_out();
+    header('Location: /index.php', true, 303);
+    exit;
+}
+
+// ── Sign in: the form posts back to this same page ──────────────────────
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && isset($_POST['password'])) {
+
+    // Password guessing is exactly what a rate limiter is for — and you
+    // already have one. Five attempts per minute per IP.
+    require_rate_limit(
+        'login',
+        config_positive_int('RATE_LIMIT_LOGIN_MAX_REQUESTS', 5),
+        config_positive_int('RATE_LIMIT_WINDOW_SECONDS_LOGIN', 60)
+    );
+
+    $password = $_POST['password'];
+
+    // password_verify() re-hashes the candidate with the stored salt and
+    // compares in constant time — the same reasoning as hash_equals()
+    // for the Bearer token.
+    if (is_string($password) && password_verify($password, config('DASHBOARD_PASSWORD_HASH'))) {
+        log_in();
+
+        // POST -> redirect -> GET. Without the redirect, refreshing the
+        // page would re-submit the password, and the browser would nag
+        // about it forever.
+        header('Location: /index.php', true, 303);
+        exit;
+    }
+
+    // Deliberately vague: never hint that a password was "close".
+    $loginError = 'Wrong password.';
+}
+
+$signedIn = is_logged_in();
 
 // ── Gather everything we want to display ─────────────────────────────────
 // A page has the same anatomy as an endpoint: collect + validate data
@@ -71,6 +115,27 @@ function e(string $s): string
 <body>
 
 <h1>⚡ IoT Metering Backend</h1>
+
+<h2>Access</h2>
+
+<?php if ($signedIn): ?>
+    <p>
+        <span class="ok">Signed in.</span>
+        <a href="/graph.php" target="_blank" rel="noopener">📈 Open the graph(click one me!)</a> ·
+        <a href="/index.php?logout=1">Sign out</a>
+    </p>
+<?php else: ?>
+    <?php if ($loginError !== ''): ?>
+        <p class="warn"><?= e($loginError) ?></p>
+    <?php endif; ?>
+
+    <form method="post" action="/index.php">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password"
+               autocomplete="current-password" required>
+        <button type="submit">Sign in</button>
+    </form>
+<?php endif; ?>
 
 <h2>Meter dashboard</h2>
 
