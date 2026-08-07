@@ -78,11 +78,11 @@ function renderSlots(slots) {
         );
 
         const energyDeltaCell = createTextCell(
-            `${slot.meter_reading_delta_kwh ?? ''} 'kWh'`
+            `${slot.meter_reading_delta_kwh ?? ''} kWh`
         );
 
         const energyNowCell = createTextCell(
-            `${slot.meter_reading_now_kwh ?? ''} 'kWh'`
+            `${slot.meter_reading_now_kwh ?? ''} kWh`
         );
 
         row.append(startCell, endCell, energyNowCell, energyDeltaCell);

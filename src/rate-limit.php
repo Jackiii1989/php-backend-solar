@@ -9,7 +9,7 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/../../src/api-helper.php';
+require_once __DIR__ . '/api-helper.php';
 
 /**
  * Allow at most $maxRequests from one client during one time window.
