@@ -32,6 +32,7 @@ require_once __DIR__ . '/../../src/api-helper.php'; # helper api functions
 require_once __DIR__ . '/../../src/db.php'; # database functions.
 require_once __DIR__ . '/../../src/rate-limit.php'; // shared API rate limiter
 require_once __DIR__ . '/../../src/meter-readings.php'; // for meter-readings api
+require_once __DIR__ . '/../../src/session.php';
 
 // ── Gate 1: only GET may pass (shared helper — same 405 + Allow header
 //    behavior as ingest.php, defined exactly once) ────────────────────────

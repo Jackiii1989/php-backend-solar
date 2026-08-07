@@ -340,6 +340,7 @@ loadButton.addEventListener('click', function() {
     chartInitialised = false;   // new query -> new view
     loadChart();
 });
+
 loadChart();
 
 drawChart(series);
