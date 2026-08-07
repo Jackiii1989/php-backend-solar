@@ -298,7 +298,7 @@ async function loadChart() {
         const slots = await fetchSlots(meterId, from, to);
         const series = buildSeries(slots);
 
-        chart.setOption(buildOption(series));
+        drawChart(series);
 
         setStatus(
             slots.length === 0
@@ -316,20 +316,9 @@ async function loadChart() {
 
 // ── Boot ───────────────────────────────────────────────────────────────
 
-// OLD VERIONS
-//const chartElement = document.getElementById('chart');
-//const chart = echarts.init(chartElement, null, { renderer: 'canvas' });
+const chartElement = document.getElementById('chart');
+const chart = echarts.init(chartElement, null, { renderer: 'canvas' });
 
-//chart.setOption(buildOption(buildSeries(SAMPLE_SLOTS)));
-
-// ECharts sizes itself to its container ONCE at init. Without this the
-// chart keeps its first width forever and looks broken after a resize.
-//window.addEventListener('resize', () => chart.resize());
-
-// First load on its own: an empty chart on arrival looks broken.
-
-
-// NEW VERSION
 // Default range: the last 7 days, ending today — in UTC, the same clock
 // as the data, so "today" means the same thing on both sides.
 const now = new Date();
@@ -341,6 +330,7 @@ loadButton.addEventListener('click', function() {
     loadChart();
 });
 
+window.addEventListener('resize', () => chart.resize());
+
 loadChart();
 
-drawChart(series);
