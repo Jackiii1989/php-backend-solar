@@ -68,56 +68,15 @@ if (!is_string($deviceId) || $deviceId === '' || strlen($deviceId) > 100) {
     $errors[] = 'device_id must be a non-empty string (max 100 chars).';
 }
 
-
 $meterId = $payload['meter_id'] ?? null;
 if (!is_string($meterId) || $meterId === '' || strlen($meterId) > 100) {
     $errors[] = 'meter_id must be a non-empty string (max 100 chars).';
 }
 
-
-
-/**
- * Validate an ISO 8601 timestamp and convert it to UTC for storage.
- *
- * Returns "YYYY-MM-DD HH:MM:SS" (what MySQL DATETIME wants), or null
- * if the value is not a valid timestamp.
- *
- * Accepts any UTC-offset form ("...T10:00:00+00:00", "...+02:00", "...Z")
- * and NORMALIZES to UTC — this is decision #6, "everything in the DB is
- * UTC", enforced at the boundary. The Pi should send UTC, but if it ever
- * sends +02:00 by accident, we store the correct moment anyway.
- */
-function parse_utc_datetime(mixed $value): ?string
-{
-    if (!is_string($value)) {
-        return null;
-    }
-
-    // "Z" is ISO 8601 shorthand for +00:00; normalize so one format
-    // string handles both spellings.
-    $normalized = str_replace('Z', '+00:00', $value);
-
-    // ATOM = "Y-m-d\TH:i:sP", e.g. 2026-07-12T10:00:00+00:00.
-    // Same round-trip trick as api-v1's date check: parse, format back,
-    // demand equality — otherwise createFromFormat "helpfully" accepts
-    // garbage like month 13 by rolling it over.
-    $dt = DateTimeImmutable::createFromFormat(DateTimeInterface::ATOM, $normalized);
-    if ($dt === false || $dt->format(DateTimeInterface::ATOM) !== $normalized) {
-        return null;
-    }
-
-    // Convert whatever offset arrived into UTC, then drop the offset —
-    // the column is DATETIME and the _utc suffix documents the convention.
-    return $dt->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
-}
-
-
 $piTimeUtc  = parse_utc_datetime($payload['ts_utc'] ?? null);
 if ($piTimeUtc === null) {
     $errors[] = 'ts_utc must be an ISO 8601 timestamp (e.g. 2026-07-12T10:00:00+00:00).';
 }
-
-
 
 // JSON numbers arrive as int (0, 1) or float (0.1) depending on how they
 // were written — accept both; reject strings ("0.1") and negatives.
@@ -125,7 +84,6 @@ $energyNow = $payload['energy_consumption_now_kwh'] ?? null;
 if (!(is_float($energyNow) || is_int($energyNow)) || $energyNow < 0) {
      $errors[] = 'energy_consumption_now_kwh must be a non-negative number.';
 } 
-
 
 $energyLast = $payload['energy_consumption_last_kwh'] ?? null;
 if (!(is_float($energyLast) || is_int($energyLast)) || $energyLast < 0) {

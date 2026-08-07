@@ -211,3 +211,67 @@ function format_utc_atom(string $mysqlDatetime): string
         new DateTimeZone('UTC')
     )->format(DateTimeInterface::ATOM);
 }
+
+
+/**
+ * Validate an ISO 8601 timestamp and convert it to UTC for storage.
+ *
+ * Returns "YYYY-MM-DD HH:MM:SS" (what MySQL DATETIME wants), or null
+ * if the value is not a valid timestamp.
+ *
+ * Accepts any UTC-offset form ("...T10:00:00+00:00", "...+02:00", "...Z")
+ * and NORMALIZES to UTC — this is decision #6, "everything in the DB is
+ * UTC", enforced at the boundary. The Pi should send UTC, but if it ever
+ * sends +02:00 by accident, we store the correct moment anyway.
+ */
+function parse_utc_datetime(mixed $value): ?string
+{
+    if (!is_string($value)) {
+        return null;
+    }
+
+    // "Z" is ISO 8601 shorthand for +00:00; normalize so one format
+    // string handles both spellings.
+    $normalized = str_replace('Z', '+00:00', $value);
+
+    // ATOM = "Y-m-d\TH:i:sP", e.g. 2026-07-12T10:00:00+00:00.
+    // Same round-trip trick as api-v1's date check: parse, format back,
+    // demand equality — otherwise createFromFormat "helpfully" accepts
+    // garbage like month 13 by rolling it over.
+    $dt = DateTimeImmutable::createFromFormat(DateTimeInterface::ATOM, $normalized);
+    if ($dt === false || $dt->format(DateTimeInterface::ATOM) !== $normalized) {
+        return null;
+    }
+
+    // Convert whatever offset arrived into UTC, then drop the offset —
+    // the column is DATETIME and the _utc suffix documents the convention.
+    return $dt->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
+}
+
+
+/**
+ * Validate a "YYYY-MM-DD" string and return midnight UTC of that day.
+ * Returns null if it isn't a real calendar date.
+ *
+ * Round-trip trick: createFromFormat accepts "2026-02-31" and silently
+ * rolls it to March 3rd. So parse, format BACK, and demand equality —
+ * only real dates survive. The "!" in '!Y-m-d' zeroes every field the
+ * format doesn't mention, giving exactly 00:00:00.
+ */
+function parse_utc_date(mixed $value): ?DateTimeImmutable
+{
+    if (!is_string($value)) {
+        return null;
+    }
+
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value, new DateTimeZone('UTC'));
+
+    if ($date === false || $date->format('Y-m-d') !== $value) {
+        return null;
+    }
+
+    return $date;
+}
+
+
+// meters ---------------------------------------------------------------------------------------------------------

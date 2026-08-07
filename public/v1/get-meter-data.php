@@ -31,7 +31,7 @@ require_once __DIR__ . '/../../src/config.php'; # function to get the environmen
 require_once __DIR__ . '/../../src/api-helper.php'; # helper api functions
 require_once __DIR__ . '/../../src/db.php'; # database functions.
 require_once __DIR__ . '/../../src/rate-limit.php'; // shared API rate limiter
-
+require_once __DIR__ . '/../../src/meter-readings.php'; // for meter-readings api
 
 // ── Gate 1: only GET may pass (shared helper — same 405 + Allow header
 //    behavior as ingest.php, defined exactly once) ────────────────────────
@@ -58,9 +58,7 @@ require_rate_limit(
 
 
 // ── Gate 3: authentication ───────────────────────────────────────────────
-// Same Bearer token as ingest — the load profile reveals when someone is
-// home / on holiday, so it is NOT public (unlike ESIT's prices).
-//
+
 // $_SERVER is the superglobal where PHP exposes the request environment;
 // incoming HTTP headers appear uppercased with an HTTP_ prefix:
 //   Authorization  ->  HTTP_AUTHORIZATION
@@ -68,12 +66,24 @@ require_rate_limit(
 // "?? ''" (null coalescing) substitutes an empty string — the function
 // always receives a real string, and "missing" flows into the normal
 // comparison as a failed match.
-require_bearer_token($_SERVER['HTTP_AUTHORIZATION'] ?? '', config('API_TOKEN_INGEST'));
+//require_bearer_token($_SERVER['HTTP_AUTHORIZATION'] ?? '', config('API_TOKEN_INGEST'));
 
+
+// Browsers send a session cookie and never hold the API token. Machines
+// (the Pi, curl) send a Bearer token. Same data, same rules, two ways of
+// proving who you are — so one endpoint, not two.
+//
+// Only consult the session when a session cookie was actually presented:
+// calling session_start() for every Pi request would litter the server
+// with junk session files. session_name() reads the cookie's name
+// without starting anything.
+if (!(isset($_COOKIE[session_name()]) && is_logged_in())) {
+    require_bearer_token($_SERVER['HTTP_AUTHORIZATION'] ?? '', config('API_TOKEN_GET_USAGE'));
+}
 
 // ── Gate 4: the ?date= query parameter ───────────────────────────────────
 // Optional; default is today in UTC (gmdate = date() in UTC).
-$date = $_GET['date'] ?? gmdate('Y-m-d');
+//$date = $_GET['date'] ?? gmdate('Y-m-d');
 
 // Round-trip validation trick: createFromFormat alone is too forgiving —
 // it happily accepts "2026-02-31" and silently rolls it over to March 3rd.
@@ -83,9 +93,37 @@ $date = $_GET['date'] ?? gmdate('Y-m-d');
 // The "!" in '!Y-m-d' means "zero out every field the format doesn't
 // mention" — hours/minutes/seconds become 00:00:00, giving us exactly
 // midnight UTC, which doubles as our day start.
-$dayStart = DateTimeImmutable::createFromFormat('!Y-m-d', $date, new DateTimeZone('UTC'));
-if ($dayStart === false || $dayStart->format('Y-m-d') !== $date) {
-    respond(400, ['error' => 'date must have the form YYYY-MM-DD.']);
+//$dayStart = DateTimeImmutable::createFromFormat('!Y-m-d', $date, new DateTimeZone('UTC'));
+//if ($dayStart === false || $dayStart->format('Y-m-d') !== $date) {
+//    respond(400, ['error' => 'date must have the form YYYY-MM-DD.']);
+//}
+
+// ── Gate 4: the time range ───────────────────────────────────────────────
+// ?from=&to= are inclusive days; ?date= is shorthand for both; nothing
+// means today. Keeping ?date= alive means the existing dashboard keeps
+// working — an old client should never break because the server learned
+// a new trick.
+$today = gmdate('Y-m-d');
+
+$from = parse_utc_date($_GET['from'] ?? $_GET['date'] ?? $today);
+$to   = parse_utc_date($_GET['to']   ?? $_GET['date'] ?? $today);
+
+if ($from === null || $to === null) {
+    respond(400, ['error' => 'from/to/date must have the form YYYY-MM-DD.']);
+}
+if ($from > $to) {
+    respond(400, ['error' => 'from must not be later than to.']);
+}
+
+// "to" names an INCLUSIVE day, but the query wants a half-open upper
+// bound: to=2026-08-07 means "through the end of the 7th".
+$rangeStart = $from;
+$rangeEnd   = $to->add(new DateInterval('P1D'));
+
+// A guard, not a preference: an unbounded range would pull the whole
+// history into memory and across the wire.
+if ($rangeStart->diff($rangeEnd)->days > 31) {
+    respond(400, ['error' => 'Range too large (maximum 31 days).']);
 }
 
 // ── Gate 5: which meter? ─────────────────────────────────────────────────
@@ -97,6 +135,7 @@ if ($meterId === '') {
     respond(400, ['error' => 'meter_id is required.']);
 }
 
+
 // The meters table is the allowlist for reads too. Asking for an
 // unregistered meter = asking for a resource that doesn't exist -> 404.
 // (Compare ingest's 422 for the same situation: there the request was
@@ -106,139 +145,20 @@ if ($meterId === '') {
 // prepare/execute with a placeholder even for this tiny query: the
 // meter_id came from the URL — user input NEVER gets glued into SQL.
 try {
-    $meterRows  = db_fetch_all(
-        'SELECT meter_id
-         FROM meters 
-         WHERE meter_id = :meter_id
-         LIMIT 1',
-         [':meter_id' => $meterId]
-    );
-
-    if ($meterRows === []) {           // no matching row -> empty array
+    if (!meter_exists($meterId)) {
         respond(404, ['error' => "Unknown meter_id '{$meterId}'."]);
     }
 
-    // ── Fetch the day's readings ────────────────────────────────────────────────
-    // The day is a HALF-OPEN interval: [ dayStart, dayStart + 1 day )
-    //   pi_time_utc >= 00:00 of the day    (>=  : midnight included)
-    //   pi_time_utc <  00:00 of NEXT day   (<   : next midnight excluded)
-    //
-    // Why "< nextDay" and not "<= 23:59:59"? Because between 23:59:59 and
-    // 00:00:00 there is an infinity of moments (23:59:59.5 ...) that a
-    // closed interval silently loses. Half-open intervals mean every moment
-    // belongs to EXACTLY one day: no gaps, no double counting.
-    //
-    // P1D = ISO 8601 duration: P(eriod) 1 D(ay). Immutable ->add() returns
-    // a NEW object; $dayStart itself is untouched.
-    $dayEnd = $dayStart->add(new DateInterval('P1D'));
-
-    $readings = db_fetch_all(
-        'SELECT
-            pi_time_utc,
-            energy_now_kwh,
-            energy_delta_kwh
-        FROM meter_readings
-        WHERE meter_id = :meter_id
-        AND pi_time_utc >= :day_start
-        AND pi_time_utc <  :day_end
-        ORDER BY pi_time_utc',      // chronological — the contract's order,
-                                    // decided by the SERVER, not left to
-                                    // whatever the storage engine returns
-        [
-            // The DB stores "Y-m-d H:i:s" in UTC (our convention, decision #6),
-            // so we format the boundaries the same way. Because the format is
-            // fixed-width with big units first (year..second), STRING comparison
-            // in SQL equals TIME comparison — same trick as in ingest validation.
-            ':meter_id'  => $meterId,
-            ':day_start' => $dayStart->format('Y-m-d H:i:s'),
-            ':day_end'   => $dayEnd->format('Y-m-d H:i:s'),
-        ]                                
-    );
-
-    // The last reading BEFORE this day. Why: energy_delta_kwh means "energy
-    // since the PREVIOUS reading", so a slot's start is the previous
-    // reading's timestamp. For the first reading of the day that predecessor
-    // lies in yesterday — without this lookup the first slot of every day
-    // would silently lose its start.
-    $earlierRows = db_fetch_all(
-        'SELECT pi_time_utc
-         FROM meter_readings
-         WHERE meter_id = :meter_id
-           AND pi_time_utc < :day_start
-         ORDER BY pi_time_utc DESC
-         LIMIT 1',
-        [
-            ':meter_id'  => $meterId,
-            ':day_start' => $dayStart->format('Y-m-d H:i:s'),
-        ]
-    );
-
-    // null when this meter has never reported before that day.
-    $previousTimestamp = $earlierRows[0]['pi_time_utc'] ?? null;
-
-
-
-    // ── Convert DB rows to contract slots ────────────────────────────────────
-    // Boundary conversion, outbound direction: storage format -> wire format.
-    // (format_utc_atom() lives in api-helper.php; its inbound twin
-    // parse_utc_datetime() lives in ingest.php — same boundary, opposite
-    // arrows.)
-    $slots = [];
-    foreach ($readings as $row) {
-        $slots[] = [
-            // null for the very first slot of a meter's history: there is
-            // no earlier reading, so the interval genuinely has no start.
-            // Honest null beats an invented timestamp.
-            'start_timestamp' => $previousTimestamp === null
-                ? null
-                : format_utc_atom($previousTimestamp),
-
-            // "2026-07-12 10:00:00" -> "2026-07-12T10:00:00+00:00"
-            // ISO 8601 with explicit offset: self-describing, no client ever
-            // has to guess a timezone. Same style as ESIT.
-            'end_timestamp'   => format_utc_atom($row['pi_time_utc']),
-
-            // PDO hands DECIMAL columns to PHP as STRINGS ("0.100000") so
-            // exactness survives the trip. Cast to float at the LAST moment
-            // so json_encode emits a number (0.1), not a quoted string.
-            'meter_reading_delta_kwh'           => (float) $row['energy_delta_kwh'],
-
-            // The cumulative counter at that moment — the raw meter face
-            // value. Lets a client verify deltas or draw the counter curve.
-            'meter_reading_now_kwh' => (float) $row['energy_now_kwh'],
-
-        ];
-
-        // This reading becomes the next slot's start.
-        $previousTimestamp = $row['pi_time_utc'];
-    }
-
+    $slots = fetch_meter_slots($meterId, $rangeStart, $rangeEnd);
 } catch (Throwable $error) {
-    /*
-     * PDO query failures arrive as PDOException. Connection failures arrive
-     * as the generic RuntimeException created by db(). Catching Throwable at
-     * this HTTP boundary guarantees that unexpected read-side failures still
-     * follow the JSON API contract.
-     */
     error_log('get-meter-data.php read failed: ' . $error->getMessage());
-
-    /*
-     * Never expose database hosts, schema names, SQL, or stack traces to the
-     * API client. Detailed information remains in the server log.
-     */
     respond(500, ['error' => 'Internal server error.']);
 }
-// ── The response ─────────────────────────────────────────────────────────
-respond(200, [
-    'meter_id'           => $meterId,
-    'date'               => $date,
-    //'unit'  			 => 'CHF/kWh',
-    'unit'  			 => 'kWh',
 
-    // "slots" stays an ARRAY even with one element (note the double [[ ):
-    // the contract says "a list of slots", and clients written against a
-    // [] on a day with no data — and that's a 200, not an error:
-    // "nothing measured that day" is a valid, complete answer to a
-    // well-formed question. Clients iterate it without special cases.
-    'slots'              => $slots,
+respond(200, [
+    'meter_id' => $meterId,
+    'from'     => $from->format('Y-m-d'),
+    'to'       => $to->format('Y-m-d'),
+    'unit'     => 'kWh',
+    'slots'    => $slots,
 ]);

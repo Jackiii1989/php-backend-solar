@@ -21,7 +21,6 @@
 const css = getComputedStyle(document.documentElement);
 const token = (name) => css.getPropertyValue(name).trim();
 
-
 const COLOR = {
     cumulative: token('--series-cumulative'),
     interval:   token('--series-interval'),
@@ -30,23 +29,33 @@ const COLOR = {
     grid:       token('--grid'),
 };
 
-// ── Sample data — the exact shape the API returns ──────────────────────
-// Replaced by a fetch in the next step; nothing else changes.
-const SAMPLE_SLOTS = [
-    { end_timestamp: '2026-08-06T00:00:00+00:00', meter_reading_delta_kwh: 0.08, meter_reading_now_kwh: 1000.08 },
-    { end_timestamp: '2026-08-06T00:15:00+00:00', meter_reading_delta_kwh: 0.09, meter_reading_now_kwh: 1000.17 },
-    { end_timestamp: '2026-08-06T00:30:00+00:00', meter_reading_delta_kwh: 0.11, meter_reading_now_kwh: 1000.28 },
-    { end_timestamp: '2026-08-06T00:45:00+00:00', meter_reading_delta_kwh: 0.12, meter_reading_now_kwh: 1000.40 },
-    { end_timestamp: '2026-08-06T01:00:00+00:00', meter_reading_delta_kwh: 0.05, meter_reading_now_kwh: 1000.45 },
-    { end_timestamp: '2026-08-06T01:15:00+00:00', meter_reading_delta_kwh: 0.04, meter_reading_now_kwh: 1000.49 },
-    { end_timestamp: '2026-08-06T01:30:00+00:00', meter_reading_delta_kwh: 0.31, meter_reading_now_kwh: 1000.80 },
-    { end_timestamp: '2026-08-06T01:45:00+00:00', meter_reading_delta_kwh: 0.28, meter_reading_now_kwh: 1001.08 },
-    { end_timestamp: '2026-08-06T02:00:00+00:00', meter_reading_delta_kwh: 0.06, meter_reading_now_kwh: 1001.14 },
-    { end_timestamp: '2026-08-06T02:15:00+00:00', meter_reading_delta_kwh: 0.07, meter_reading_now_kwh: 1001.21 },
-    { end_timestamp: '2026-08-06T02:30:00+00:00', meter_reading_delta_kwh: 0.09, meter_reading_now_kwh: 1001.30 },
-    { end_timestamp: '2026-08-06T02:45:00+00:00', meter_reading_delta_kwh: 0.10, meter_reading_now_kwh: 1001.40 },
-];
+const meterInput = document.getElementById('meter');
+const fromInput  = document.getElementById('from');
+const toInput    = document.getElementById('to');
+const loadButton = document.getElementById('load');
+const statusEl   = document.getElementById('status');
 
+
+
+// ECharts must be given the FULL option once. After that we send only
+// the series data: setOption merges, so everything we omit — axes,
+// legend, and crucially the user's dataZoom position — is left alone.
+let chartInitialised = false;
+
+function drawChart(series) {
+    if (!chartInitialised) {
+        chart.setOption(buildOption(series));
+        chartInitialised = true;
+        return;
+    }
+
+    chart.setOption({
+        series: [
+            { name: 'Energy per interval', data: series.intervalPoints },
+            { name: 'Cumulative energy',   data: series.cumulativePoints },
+        ],
+    });
+}
 
 /**
  * Turn API slots into the two series ECharts draws.
@@ -73,7 +82,7 @@ function buildSeries(slots) {
         cumulativePoints.push([t, runningTotal, slot.meter_reading_now_kwh]);
     }
 
-    return { intervalPoints, cumulativePoints };
+    return { intervalPoints, cumulativePoints, total: runningTotal };
 }
 
 
@@ -214,12 +223,123 @@ function buildOption({ intervalPoints, cumulativePoints }) {
     };
 }
 
-// ── Boot ───────────────────────────────────────────────────────────────
-const chartElement = document.getElementById('chart');
-const chart = echarts.init(chartElement, null, { renderer: 'canvas' });
 
-chart.setOption(buildOption(buildSeries(SAMPLE_SLOTS)));
+function setStatus(message, className) {
+    statusEl.textContent = message;        // textContent, not innerHTML:
+    statusEl.className = className || '';  // messages carry API text
+}
+
+/** "YYYY-MM-DD" for a Date, in UTC. */
+function isoDate(date) {
+    return date.toISOString().slice(0, 10);
+}
+
+
+
+/** Fetch one range of slots. Throws on any non-2xx. */
+async function fetchSlots(meterId, from, to) {
+    // URL + searchParams encodes values properly — never glue a query
+    // string together by hand.
+    const url = new URL('/v1/get-meter-data.php', window.location.origin);
+    url.searchParams.set('meter_id', meterId);
+    url.searchParams.set('from', from);
+    url.searchParams.set('to', to);
+
+    const response = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+        // Default for same-origin anyway, but stated so the mechanism is
+        // visible: THIS is what carries the session cookie. No token.
+        credentials: 'same-origin',
+        cache: 'no-store',
+    });
+
+    // 401 = the session expired while this tab sat open. A fetch cannot
+    // follow a redirect to a login page (it would just fetch the HTML),
+    // so the page navigates itself.
+    if (response.status === 401) {
+        window.location.href = '/index.php';
+        throw new Error('Session expired.');
+    }
+
+    // Parse first: our API sends errors as JSON too, and "Range too
+    // large" beats "HTTP 400".
+    let payload;
+    try {
+        payload = await response.json();
+    } catch {
+        throw new Error('Server returned invalid JSON (HTTP ' + response.status + ').');
+    }
+
+    if (!response.ok) {
+        throw new Error(payload.error ?? ('HTTP ' + response.status));
+    }
+    if (!Array.isArray(payload.slots)) {
+        throw new Error('Response has no slots array.');
+    }
+
+    return payload.slots;
+}
+
+/** Read the controls, fetch, redraw. */
+async function loadChart() {
+    const meterId = meterInput.value.trim();
+    const from = fromInput.value;
+    const to = toInput.value;
+
+    if (meterId === '' || from === '' || to === '') {
+        setStatus('Meter ID, from and to are all required.', 'warn');
+        return;
+    }
+
+    loadButton.disabled = true;
+    setStatus('Loading…');
+
+    try {
+        const slots = await fetchSlots(meterId, from, to);
+        const series = buildSeries(slots);
+
+        chart.setOption(buildOption(series));
+
+        setStatus(
+            slots.length === 0
+                ? 'No readings for ' + meterId + ' between ' + from + ' and ' + to + '.'
+                : slots.length + ' readings · ' + series.total.toFixed(3) + ' kWh total'
+        );
+    } catch (error) {
+        // Keep the previous chart on screen: a transient failure should
+        // not wipe out what the reader was looking at.
+        setStatus(error.message ?? 'Request failed.', 'warn');
+    } finally {
+        loadButton.disabled = false;
+    }
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────
+
+// OLD VERIONS
+//const chartElement = document.getElementById('chart');
+//const chart = echarts.init(chartElement, null, { renderer: 'canvas' });
+
+//chart.setOption(buildOption(buildSeries(SAMPLE_SLOTS)));
 
 // ECharts sizes itself to its container ONCE at init. Without this the
 // chart keeps its first width forever and looks broken after a resize.
-window.addEventListener('resize', () => chart.resize());
+//window.addEventListener('resize', () => chart.resize());
+
+// First load on its own: an empty chart on arrival looks broken.
+
+
+// NEW VERSION
+// Default range: the last 7 days, ending today — in UTC, the same clock
+// as the data, so "today" means the same thing on both sides.
+const now = new Date();
+toInput.value = isoDate(now);
+fromInput.value = isoDate(new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000));
+
+loadButton.addEventListener('click', function() {
+    chartInitialised = false;   // new query -> new view
+    loadChart();
+});
+loadChart();
+
+drawChart(series);
