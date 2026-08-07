@@ -334,3 +334,37 @@ window.addEventListener('resize', () => chart.resize());
 
 loadChart();
 
+// ── Live refresh ───────────────────────────────────────────────────────
+// 15 seconds. setTimeout, NOT setInterval: the next request is scheduled
+// only after the previous one finishes, so a slow network can never
+// stack up overlapping requests.
+const REFRESH_MS = 15000;
+let refreshTimer = null;
+
+function scheduleRefresh() {
+    window.clearTimeout(refreshTimer);
+    refreshTimer = window.setTimeout(refreshTick, REFRESH_MS);
+}
+
+async function refreshTick() {
+    // document.hidden = the tab is in the background. Browsers throttle
+    // timers there anyway; skipping the request outright is honest about
+    // it and saves the server the work. The visibilitychange listener
+    // below catches us up the moment the tab returns.
+    if (!document.hidden) {
+        await loadChart();
+    }
+
+    scheduleRefresh();
+}
+
+// Coming back to the tab: refresh immediately rather than waiting out
+// the remainder of the interval.
+document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) {
+        window.clearTimeout(refreshTimer);
+        refreshTick();
+    }
+});
+
+scheduleRefresh();
