@@ -109,7 +109,7 @@ require_login();
 <div id="controls">
     <div>
         <label for="meter">Meter ID</label>
-        <input type="text" id="meter" value="mock-meter-001" size="18">
+        <input type="text" id="meter" value="meter-001" size="18">
     </div>
     <div>
         <label for="from">From (UTC)</label>

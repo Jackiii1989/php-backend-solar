@@ -156,7 +156,7 @@ function e(string $s): string
         <input
             id="dashboard-meter"
             type="text"
-            value="mock-meter-001"
+            value="meter-001"
         >
     </p>
 
