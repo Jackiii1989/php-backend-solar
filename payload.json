@@ -1,0 +1,10 @@
+{
+  "device_id": "gateway-001-abcd1234",
+  "ts_utc": "2026-11-15T18:05:11+00:00",
+  "meter_id": "meter-001",
+  "import_kwh": 0.24399998784065247,
+  "export_kwh": 0.0,
+  "power_l1_w": 20.091312408447266,
+  "power_l2_w": 0.0,
+  "power_l3_w": 0.0
+}

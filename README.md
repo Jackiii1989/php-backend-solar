@@ -15,13 +15,13 @@ php-backend-solar-pi/
 |-- .env                         Local configuration and secrets
 |-- db/
 |   `-- schema.sql               MySQL/MariaDB schema (devices, meters, meter_readings)
-|-- docs/                        Requirements, plans, and command notes
+|-- docs/                        Requirements, plans, migration runbook, notes
 |-- public/                      Web document root
 |   |-- .htaccess                Forwards Authorization on Apache/FastCGI
 |   |-- index.php                Landing page, login form, token dashboard
 |   |-- dashboard.js             Table dashboard (token in a password field)
 |   |-- graph.php                Chart page (session-gated)
-|   |-- graph.js                 ECharts chart behavior
+|   |-- graph.js                 Two ECharts charts: power (W), energy (kWh)
 |   |-- ingest.php               POST endpoint the Pi calls
 |   |-- vendor/echarts.min.js    Vendored chart library (no CDN)
 |   `-- v1/
@@ -49,7 +49,7 @@ Create `.env` in the repository root. Every key below is read through
 `src/config.php`, which checks process environment variables first, then `.env`.
 
 ```dotenv
-DB_HOST=127.0.0.1
+DB_HOST=localhost
 DB_NAME=iot_metering
 DB_USER=iot_meter_backend
 DB_PASS=replace-with-local-password
@@ -97,7 +97,7 @@ Get-Content db\schema.sql | mysql.exe -u root -p
 Create a least-privilege application user:
 
 ```powershell
-mysql.exe -u root -p -e "CREATE USER IF NOT EXISTS 'iot_meter_backend'@'127.0.0.1' IDENTIFIED BY 'replace-with-local-password'; GRANT SELECT, INSERT ON iot_metering.* TO 'iot_meter_backend'@'127.0.0.1';"
+mysql.exe -u root -p -e "CREATE USER IF NOT EXISTS 'iot_meter_backend'@'localhost' IDENTIFIED BY 'replace-with-local-password'; GRANT SELECT, INSERT ON iot_metering.* TO 'iot_meter_backend'@'localhost';"
 ```
 
 Register a development device and meter. A meter belongs to a device, and
@@ -105,9 +105,9 @@ Register a development device and meter. A meter belongs to a device, and
 must exist first, and the pair must match exactly what the Pi sends:
 
 ```powershell
-mysql.exe -u root -p -e "INSERT INTO iot_metering.devices (device_id, name, description, created_at_utc) VALUES ('pi-01', 'Raspberry Pi 01', 'Local testing', UTC_TIMESTAMP());"
+mysql.exe -u root -p -e "INSERT INTO iot_metering.devices (device_id, name, description, created_at_utc) VALUES ('gateway-001-abcd1234', 'Gateway 001', 'Solar site', UTC_TIMESTAMP());"
 
-mysql.exe -u root -p -e "INSERT INTO iot_metering.meters (meter_id, device_id, name, description, created_at_utc) VALUES ('mock-meter-001', 'pi-01', 'Development meter', 'Local testing', UTC_TIMESTAMP());"
+mysql.exe -u root -p -e "INSERT INTO iot_metering.meters (meter_id, device_id, name, description, created_at_utc) VALUES ('meter-001', 'gateway-001-abcd1234', 'Main meter', 'Import/export + 3-phase power', UTC_TIMESTAMP());"
 ```
 
 Inspect what is registered:
@@ -163,29 +163,29 @@ $WRITE = "<API_TOKEN_INGEST from .env>"
 
 ### `GET /v1/list-meters.php`
 
-Every registered meter. Used by future picker UI; also handy for checking what
-the database knows about.
+Every registered meter. Handy for checking what the database knows about;
+intended for a meter picker that is not built yet.
 
 ```powershell
 curl.exe -i "http://127.0.0.1:8000/v1/list-meters.php" -H "Authorization: Bearer $READ"
 ```
 
 ```json
-{"meters":[{"meter_id":"mock-meter-001","name":"Development meter","description":"Local testing"}]}
+{"meters":[{"meter_id":"meter-001","name":"Main meter","description":"Import/export + 3-phase power"}]}
 ```
 
 Statuses: `200`, `401`, `405`, `429`, `500`.
 
 ### `GET /v1/get-meter-data.php`
 
-One meter's readings over a UTC date range, as slots.
+One meter's readings over a UTC date range, exactly as stored.
 
 ```powershell
 # One day
-curl.exe -i "http://127.0.0.1:8000/v1/get-meter-data.php?date=2026-08-07&meter_id=mock-meter-001" -H "Authorization: Bearer $READ"
+curl.exe -i "http://127.0.0.1:8000/v1/get-meter-data.php?date=2026-11-15&meter_id=meter-001" -H "Authorization: Bearer $READ"
 
 # A range (inclusive days, maximum 31)
-curl.exe -i "http://127.0.0.1:8000/v1/get-meter-data.php?from=2026-08-01&to=2026-08-07&meter_id=mock-meter-001" -H "Authorization: Bearer $READ"
+curl.exe -i "http://127.0.0.1:8000/v1/get-meter-data.php?from=2026-11-09&to=2026-11-15&meter_id=meter-001" -H "Authorization: Bearer $READ"
 ```
 
 `meter_id` is required. `date` is shorthand for `from`+`to`; omitting all three
@@ -193,28 +193,33 @@ means today in UTC.
 
 ```json
 {
-  "meter_id": "mock-meter-001",
-  "from": "2026-08-07",
-  "to": "2026-08-07",
-  "unit": "kWh",
-  "slots": [
+  "meter_id": "meter-001",
+  "from": "2026-11-15",
+  "to": "2026-11-15",
+  "readings": [
     {
-      "start_timestamp": null,
-      "end_timestamp": "2026-08-07T10:00:00+00:00",
-      "meter_reading_delta_kwh": 0.5,
-      "meter_reading_now_kwh": 2000
+      "timestamp": "2026-11-15T19:00:00+00:00",
+      "import_kwh": 1.0,
+      "export_kwh": 0.1,
+      "power_l1_w": 230.5,
+      "power_l2_w": 0.0,
+      "power_l3_w": 0.0
     }
   ]
 }
 ```
 
-A slot spans `[previous reading, this reading)`. The first slot's
-`start_timestamp` is `null` only when no earlier reading exists at all;
-otherwise the endpoint looks back before the range to find it.
+One database row is one entry. Nothing is derived: `import_kwh` and
+`export_kwh` are the meter's raw cumulative counters, and the three power
+values are instantaneous, so a negative one means that phase is exporting.
 
-Statuses: `200` (possibly empty `slots`), `400` (bad date, reversed range, range
-over 31 days, missing `meter_id`), `401`, `404` (unknown meter), `405`, `429`,
-`500`.
+There is no top-level `unit` field. One response carries both kWh and watts,
+so no single label could be honest about both — the units live in the field
+names instead.
+
+Statuses: `200` (possibly empty `readings`), `400` (bad date, reversed range,
+range over 31 days, missing `meter_id`), `401`, `404` (unknown meter), `405`,
+`429`, `500`.
 
 ### `POST /ingest.php`
 
@@ -225,12 +230,14 @@ Create `payload.json` in the repository root:
 ```powershell
 @'
 {
-  "device_id": "pi-01",
-  "meter_id": "mock-meter-001",
-  "ts_utc": "2026-08-07T10:00:00+00:00",
-  "energy_consumption_now_kwh": 1000.42,
-  "energy_consumption_last_kwh": 1000.0,
-  "energy_consumption_delta_kwh": 0.42
+  "device_id": "gateway-001-abcd1234",
+  "meter_id": "meter-001",
+  "ts_utc": "2026-11-15T18:05:11+00:00",
+  "import_kwh": 0.244,
+  "export_kwh": 0.0,
+  "power_l1_w": 20.091,
+  "power_l2_w": 0.0,
+  "power_l3_w": 0.0
 }
 '@ | Set-Content -Encoding ascii payload.json
 ```
@@ -254,6 +261,11 @@ Expect `201 {"status":"created"}` the first time and
 `200 {"status":"already recorded"}` on an exact repeat — the unique key on
 `(device_id, meter_id, pi_time_utc)` makes retries harmless.
 
+`import_kwh` and `export_kwh` must be non-negative — they are totalizers. The
+three `power_l*_w` values may be **negative**: a phase that is exporting reads
+negative watts, and rejecting that would discard exactly what this project
+measures.
+
 Statuses: `201`, `200` (duplicate), `400` (invalid payload, with a `details`
 list naming every failed field), `401`, `405`, `413` (body over 16 KiB), `422`
 (the `device_id`/`meter_id` pair is not registered), `429`, `500`.
@@ -268,22 +280,26 @@ Get-ChildItem src,public -Recurse -Filter *.php | ForEach-Object { php -l $_.Ful
 
 ## Known issues
 
-Verified by running the code; see the same list in
-[`docs/arhitecture-decisions.md`](docs/arhitecture-decisions.md) for detail.
+Verified by running the code.
 
-- `public/index.php` does not load `src/api-helper.php`, so the login rate
-  limiter cannot call `respond()`. The 6th login attempt within a minute
-  returns `500` instead of `429`. The limit still blocks the attempt.
-- `public/graph.php` links to `/logout.php`, which does not exist. Signing out
-  from the chart page 404s; the working link is `/index.php?logout=1`.
 - The API table on `public/index.php` shows the old path
-  `/get-meter-data.php` (the real one is `/v1/get-meter-data.php`) and does not
-  list the other endpoints.
-- `.env` and `body.json` are tracked by Git, and `.gitignore` contains a comment
-  about secrets but no `.env` rule. Any credential that has been pushed should
-  be considered exposed and rotated.
-- `meter_readings.energy_last_kwh` is `NOT NULL` and ingestion requires a
-  number, so a reading with `"energy_consumption_last_kwh": null` is rejected
-  with `400`. The Pi sends `null` for a meter's first-ever reading.
+  `/get-meter-data.php` (the real one is `/v1/get-meter-data.php`), describes
+  it as "price slots (mock data)", and does not list the other endpoints.
+- `.env` and `body.json` are tracked by Git, and `.gitignore` contains a
+  comment about secrets but no `.env` rule. Any credential that has been
+  pushed should be considered exposed and rotated.
 - The meter-picker feature is half-built: `fetch_meters()` and
-  `/v1/list-meters.php` exist, but no page calls them yet.
+  `/v1/list-meters.php` exist and work, but no page calls them yet.
+- `docs/arhitecture-decisions.md` still describes the pre-migration design.
+  Its replacement is sitting beside it as `arhitecture-decisions (2).md`.
+
+### Fixed since the last review
+
+- The login rate limiter returned `500` instead of `429`, because
+  `index.php` never loaded `api-helper.php` and `respond()` was undefined.
+  `rate-limit.php` now requires it directly, which fixes it for every caller
+  rather than one.
+- `public/graph.php` linked to `/logout.php`, which has never existed.
+- A meter's first-ever reading was rejected: `energy_last_kwh` was `NOT NULL`
+  while the Pi sent `null`. Both the column and that field are gone.
+- `dashboard.js` read `slot.unit`, which the API had stopped sending.

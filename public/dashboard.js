@@ -55,37 +55,31 @@ function createTextCell(value) {
 }
 
 /**
- * Replace the existing table rows with slots from the latest API response.
+ * Replace the existing table rows with readings from the latest API response.
  */
-function renderSlots(slots) {
+function renderReadings(readings) {
     // Remove rows from the previous successful response.
     slotsElement.replaceChildren();
 
-    if (slots.length === 0) {
+    if (readings.length === 0) {
         tableElement.hidden = true;
         return;
     }
 
-    for (const slot of slots) {
+    for (const reading of readings) {
         const row = document.createElement('tr');
 
-        const startCell = createTextCell(
-            slot.start_timestamp ?? ''
+        // ?? '' and not || '': a power reading of 0 is a real value and must
+        // survive. || would replace it with an empty cell.
+        row.append(
+            createTextCell(reading.timestamp ?? ''),
+            createTextCell(reading.import_kwh ?? ''),
+            createTextCell(reading.export_kwh ?? ''),
+            createTextCell(reading.power_l1_w ?? ''),
+            createTextCell(reading.power_l2_w ?? ''),
+            createTextCell(reading.power_l3_w ?? '')
         );
 
-        const endCell = createTextCell(
-            slot.end_timestamp ?? ''
-        );
-
-        const energyDeltaCell = createTextCell(
-            `${slot.meter_reading_delta_kwh ?? ''} kWh`
-        );
-
-        const energyNowCell = createTextCell(
-            `${slot.meter_reading_now_kwh ?? ''} kWh`
-        );
-
-        row.append(startCell, endCell, energyNowCell, energyDeltaCell);
         slotsElement.append(row);
     }
 
@@ -227,17 +221,17 @@ async function loadDashboard() {
             throw new Error(errorMessage);
         }
 
-        if (!Array.isArray(responseData.slots)) {
+        if (!Array.isArray(responseData.readings)) {
             throw new Error(
-                'The API response does not contain a slots array.'
+                'The API response does not contain a readings array.'
             );
         }
 
-        renderSlots(responseData.slots);
+        renderReadings(responseData.readings);
 
         const updateTime = new Date().toISOString();
 
-        if (responseData.slots.length === 0) {
+        if (responseData.readings.length === 0) {
             setDashboardStatus(
                 `No measurements found for ${controls.meterId} ` +
                 `on ${controls.date}. Last checked ${updateTime}.`,
@@ -245,7 +239,7 @@ async function loadDashboard() {
             );
         } else {
             setDashboardStatus(
-                `Loaded ${responseData.slots.length} measurement(s). ` +
+                `Loaded ${responseData.readings.length} measurement(s). ` +
                 `Last updated ${updateTime}.`,
                 'ok'
             );

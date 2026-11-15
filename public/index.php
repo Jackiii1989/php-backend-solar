@@ -186,10 +186,12 @@ function e(string $s): string
 <table id="dashboard-table" hidden>
     <thead>
         <tr>
-            <th>Start (UTC)</th>
-            <th>End (UTC)</th>
-            <th>Energy now</th>
-            <th>Energy delta</th>
+            <th>Time (UTC)</th>
+            <th>Import (kWh)</th>
+            <th>Export (kWh)</th>
+            <th>L1 (W)</th>
+            <th>L2 (W)</th>
+            <th>L3 (W)</th> 
         </tr>
     </thead>
 

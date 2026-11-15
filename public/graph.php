@@ -39,8 +39,11 @@ require_login();
             --text-primary:   #0b0b0b;
             --text-secondary: #52514e;
             --grid:           #e6e5e1;
-            --series-cumulative: #2a78d6;  /* blue  — the line  */
-            --series-interval:   #eb6834;  /* orange— the bars  */
+            --power-l1:      #2a78d6;  /* blue   */
+            --power-l2:      #eb6834;  /* orange */
+            --power-l3:      #4a3aa7;  /* violet */
+            --energy-import: #e34948;  /* red   — drawn from the grid */
+            --energy-export: #1baf7a;  /* green — sent back to the grid */
         }
 
         /* Dark values are SELECTED for the dark surface, not auto-flipped. */
@@ -51,8 +54,11 @@ require_login();
                 --text-primary:   #ffffff;
                 --text-secondary: #c3c2b7;
                 --grid:           #333330;
-                --series-cumulative: #3987e5;
-                --series-interval:   #d95926;
+                --power-l1:      #3987e5;
+                --power-l2:      #d95926;
+                --power-l3:      #9085e9;
+                --energy-import: #e66767;
+                --energy-export: #199e70;
             }
         }
 
@@ -74,9 +80,11 @@ require_login();
                           color: var(--text-secondary); }
         #controls input, #controls button { font: inherit; padding: .35rem .5rem; }
 
-        /* The chart needs an explicit height: ECharts measures its
+        /* Each chart needs an explicit height: ECharts measures its
            container, and a div with no content has height 0. */
-        #chart { width: 100%; height: 26rem; }
+        #chart-power, #chart-energy { width: 100%; height: 17rem; }
+        .chart-label { font-size: .8rem; color: var(--text-secondary);
+                       margin: .8rem 0 .2rem; }
 
         #status { font-size: .85rem; color: var(--text-secondary);
                   min-height: 1.4em; }
@@ -92,8 +100,10 @@ require_login();
 
 <h1>Energy over time</h1>
 <p id="subtitle" style="color: var(--text-secondary); margin: 0;">
-    Bars: energy per interval. Line: cumulative energy since the start of
-    the range. Both in kWh, times in UTC.
+    Readings exactly as the meter reported them. Top: instantaneous power per
+    phase in watts, where negative means that phase is exporting. Bottom:
+    cumulative import and export counters in kWh. Times in UTC; zooming
+    either chart moves both.
 </p>
 
 <div id="controls">
@@ -110,10 +120,14 @@ require_login();
         <input type="date" id="to">
     </div>
     <button id="load" type="button">Load</button>
-    <a href="/logout.php">Sign out</a>
+     <a href="/index.php?logout=1">Sign out</a>
 </div>
 
-<div id="chart"></div>
+<p class="chart-label">Power per phase (W) — instantaneous</p>
+<div id="chart-power"></div>
+
+<p class="chart-label">Energy counters (kWh) — cumulative meter totals</p>
+<div id="chart-energy"></div>
 <p id="status"></p>
 
 </body>

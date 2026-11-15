@@ -30,66 +30,6 @@ function meter_exists(string $meterId): bool
     return $rows !== [];
 }
 
-/**
- * Readings for one meter over a half-open range [start, end), as slots.
- *
- * @return array<int, array<string, mixed>>
- */
-function fetch_meter_slots(
-    string $meterId,
-    DateTimeImmutable $rangeStart,
-    DateTimeImmutable $rangeEnd
-): array {
-    $startSql = $rangeStart->format('Y-m-d H:i:s');
-    $endSql   = $rangeEnd->format('Y-m-d H:i:s');
-
-    $readings = db_fetch_all(
-        'SELECT pi_time_utc, energy_now_kwh, energy_delta_kwh
-         FROM meter_readings
-         WHERE meter_id = :meter_id
-           AND pi_time_utc >= :range_start
-           AND pi_time_utc <  :range_end
-         ORDER BY pi_time_utc',
-        [
-            ':meter_id'    => $meterId,
-            ':range_start' => $startSql,
-            ':range_end'   => $endSql,
-        ]
-    );
-
-    // The reading immediately before the range gives the FIRST slot its
-    // start — energy_delta_kwh means "energy since the previous reading".
-    $earlier = db_fetch_all(
-        'SELECT pi_time_utc
-         FROM meter_readings
-         WHERE meter_id = :meter_id
-           AND pi_time_utc < :range_start
-         ORDER BY pi_time_utc DESC
-         LIMIT 1',
-        [
-            ':meter_id'    => $meterId,
-            ':range_start' => $startSql,
-        ]
-    );
-
-    $previousTimestamp = $earlier[0]['pi_time_utc'] ?? null;
-
-    $slots = [];
-    foreach ($readings as $row) {
-        $slots[] = [
-            'start_timestamp' => $previousTimestamp === null
-                ? null
-                : format_utc_atom($previousTimestamp),
-            'end_timestamp'   => format_utc_atom($row['pi_time_utc']),
-            'meter_reading_delta_kwh' => (float) $row['energy_delta_kwh'],
-            'meter_reading_now_kwh'   => (float) $row['energy_now_kwh'],
-        ];
-
-        $previousTimestamp = $row['pi_time_utc'];   // becomes the next slot's start
-    }
-
-    return $slots;
-}
 
 /**
  * Every registered meter, for the picker on the graph page.
@@ -110,4 +50,58 @@ function fetch_meters(): array
          FROM meters
          ORDER BY name, meter_id'
     );
+}
+
+
+/**
+ * Raw readings for one meter over a half-open range [start, end).
+ *
+ * Nothing is derived here. Each row goes out exactly as the meter reported
+ * it, so the chart draws measurements rather than arithmetic.
+ *
+ * The loop is not business logic — it is the storage-format-to-wire-format
+ * boundary, and it does exactly two jobs:
+ *
+ *   1. MySQL DATETIME carries no timezone, so format_utc_atom() re-attaches
+ *      the explicit +00:00 the client needs.
+ *   2. PDO returns DECIMAL columns as STRINGS ("0.244000"). Casting to float
+ *      means the JSON holds numbers, so JavaScript can plot them without
+ *      calling Number() on every value.
+ *
+ * @return array<int, array<string, mixed>>
+ */
+function fetch_meter_readings(
+    string $meterId,
+    DateTimeImmutable $rangeStart,
+    DateTimeImmutable $rangeEnd
+): array {
+    $rows = db_fetch_all(
+        'SELECT pi_time_utc,
+                import_kwh, export_kwh,
+                power_l1_w, power_l2_w, power_l3_w
+         FROM meter_readings
+         WHERE meter_id = :meter_id
+           AND pi_time_utc >= :range_start
+           AND pi_time_utc <  :range_end
+         ORDER BY pi_time_utc',
+        [
+            ':meter_id'    => $meterId,
+            ':range_start' => $rangeStart->format('Y-m-d H:i:s'),
+            ':range_end'   => $rangeEnd->format('Y-m-d H:i:s'),
+        ]
+    );
+
+    $readings = [];
+    foreach ($rows as $row) {
+        $readings[] = [
+            'timestamp'  => format_utc_atom($row['pi_time_utc']),
+            'import_kwh' => (float) $row['import_kwh'],
+            'export_kwh' => (float) $row['export_kwh'],
+            'power_l1_w' => (float) $row['power_l1_w'],
+            'power_l2_w' => (float) $row['power_l2_w'],
+            'power_l3_w' => (float) $row['power_l3_w'],
+        ];
+    }
+
+    return $readings;
 }

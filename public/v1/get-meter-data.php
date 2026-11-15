@@ -7,7 +7,7 @@
  *   GET /v1/get-meter-data.php?date=YYYY-MM-DD&meter_id=...
  *   Authorization: Bearer <API_TOKEN_GET_USAGE>
  *
- *   200 day of slots (possibly empty) | 400 bad or missing input
+ *   200 range of readings (possibly empty) | 400 bad or missing input
  *   401 bad token                     | 404 unknown meter
  *   405 wrong verb                    | 429 rate limit exceeded
  *   500 unexpected server or database failure
@@ -15,10 +15,14 @@
  * This is the read-side twin of ingest.php: what the Pi POSTs in,
  * a client GETs back out — same table, opposite direction.
  *
- * Each slot's value is the energy measured BETWEEN two readings, so a
- * slot spans [previous reading, this reading). The first slot of a day
- * therefore needs the last reading of the previous day — see the
- * lookback query below.
+ * Readings are returned exactly as stored — raw cumulative energy counters
+ * plus instantaneous per-phase power. Nothing is derived, so there is no
+ * lookback query and no interval arithmetic: one row in the database is one
+ * entry in the response.
+ *
+ * Units live in the field names (import_kwh, power_l1_w), because one
+ * response carries both kWh and watts and no single unit label could be
+ * honest about both.
  */
 
 declare(strict_types=1);
@@ -150,7 +154,7 @@ try {
         respond(404, ['error' => "Unknown meter_id '{$meterId}'."]);
     }
 
-    $slots = fetch_meter_slots($meterId, $rangeStart, $rangeEnd);
+      $readings = fetch_meter_readings($meterId, $rangeStart, $rangeEnd);
 } catch (Throwable $error) {
     error_log('get-meter-data.php read failed: ' . $error->getMessage());
     respond(500, ['error' => 'Internal server error.']);
@@ -160,6 +164,5 @@ respond(200, [
     'meter_id' => $meterId,
     'from'     => $from->format('Y-m-d'),
     'to'       => $to->format('Y-m-d'),
-    'unit'     => 'kWh',
-    'slots'    => $slots,
+    'readings' => $readings,
 ]);

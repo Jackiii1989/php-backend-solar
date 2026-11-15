@@ -79,21 +79,35 @@ if ($piTimeUtc === null) {
 }
 
 // JSON numbers arrive as int (0, 1) or float (0.1) depending on how they
-// were written — accept both; reject strings ("0.1") and negatives.
-$energyNow = $payload['energy_consumption_now_kwh'] ?? null;
-if (!(is_float($energyNow) || is_int($energyNow)) || $energyNow < 0) {
-     $errors[] = 'energy_consumption_now_kwh must be a non-negative number.';
-} 
+// were written — accept both; reject strings ("0.1").
+//
+// Two loops, not one, because the two groups have DIFFERENT rules. That
+// difference is the physics, so it's worth seeing in the code shape.
 
-$energyLast = $payload['energy_consumption_last_kwh'] ?? null;
-if (!(is_float($energyLast) || is_int($energyLast)) || $energyLast < 0) {
-     $errors[] = 'energy_consumption_last_kwh must be a number.';
-} 
 
-$energyDelta = $payload['energy_consumption_delta_kwh'] ?? null;
-if (!(is_float($energyDelta) || is_int($energyDelta)) || $energyDelta < 0) {
-     $errors[] = 'energy_consumption_delta_kwh must be a non-negative number.';
-} 
+// Cumulative counters. A totalizer can never be negative, and it can never
+// legitimately decrease either — but "decreasing" needs the previous row to
+// detect, so that belongs in step 3, not here.
+foreach (['import_kwh', 'export_kwh'] as $field) {
+    $value = $payload[$field] ?? null;
+
+    if (!(is_float($value) || is_int($value)) || $value < 0) {
+        $errors[] = "{$field} must be a non-negative number.";
+    }
+}
+
+// Instantaneous power, and NEGATIVE IS VALID here. On a solar site a phase
+// that is exporting reads negative watts — that's the inverter pushing back
+// into the grid, not an error. Rejecting it would silently discard exactly
+// the data this project exists to measure.
+foreach (['power_l1_w', 'power_l2_w', 'power_l3_w'] as $field) {
+    $value = $payload[$field] ?? null;
+
+    if (!(is_float($value) || is_int($value))) {
+        $errors[] = "{$field} must be a number.";
+    }
+}
+
 
 if ($errors !== []) {
     respond(400, ['error' => 'Invalid payload.', 'details' => $errors]);
@@ -149,19 +163,23 @@ $sql = 'INSERT INTO meter_readings
             (
                 meter_id, 
                 device_id,
-                energy_now_kwh,
-                energy_last_kwh,
-                energy_delta_kwh,
-                pi_time_utc
+                pi_time_utc,
+                import_kwh,
+                export_kwh,
+                power_l1_w,
+                power_l2_w,
+                power_l3_w
             )
         VALUES
             (
                 :meter_id,
                 :device_id,
-                :energy_now_kwh,
-                :energy_last_kwh,
-                :energy_delta_kwh,
-                :pi_time_utc
+                :pi_time_utc,
+                :import_kwh,
+                :export_kwh,
+                :power_l1_w,
+                :power_l2_w,
+                :power_l3_w
             )';
 
 try {
@@ -169,12 +187,18 @@ try {
     // travel to MySQL separately — a hostile meter_id is just a string,
     // never executable SQL (this is why EMULATE_PREPARES is off).
     db()->prepare($sql)->execute([
-        ':meter_id'             => $meterId,
-        ':device_id'            => $deviceId,
-        ':energy_now_kwh'       => $energyNow,
-        ':energy_last_kwh'      => $energyLast,
-        ':energy_delta_kwh'     => $energyDelta,
-        ':pi_time_utc'          => $piTimeUtc ,
+        ':meter_id'    => $meterId,
+        ':device_id'   => $deviceId,
+        ':pi_time_utc' => $piTimeUtc,
+
+        // Read straight from $payload: validation above already proved these
+        // keys exist and hold numbers, and respond() exits on failure — so
+        // there is no path to here with a missing or bad value.
+        ':import_kwh'  => $payload['import_kwh'],
+        ':export_kwh'  => $payload['export_kwh'],
+        ':power_l1_w'  => $payload['power_l1_w'],
+        ':power_l2_w'  => $payload['power_l2_w'],
+        ':power_l3_w'  => $payload['power_l3_w'],
     ]);
 } catch (PDOException $e) {
     // errorInfo = [SQLSTATE, driver-specific errno, message];

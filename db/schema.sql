@@ -8,7 +8,8 @@
 -- (select the database in phpMyAdmin's sidebar first).
 
 -- Design: docs/backend_php_project_plan.md, revised to a normalized
--- two-table layout — meters (entities) and meter_aggregates (events),
+-- three-table layout — devices and meters (entities), meter_readings
+-- (events) — linked by foreign keys.
 -- linked by a foreign key.
 
 CREATE DATABASE IF NOT EXISTS iot_metering
@@ -69,10 +70,33 @@ CREATE TABLE IF NOT EXISTS meter_readings(
 	device_id VARCHAR(100) NOT NULL,
 	pi_time_utc DATETIME NOT NULL,
 
-	-- exact decimal number: 12 digits total, 6 of them after the decimal point
-	energy_now_kwh DECIMAL(12,6) NOT NULL,
-	energy_last_kwh DECIMAL(12,6) NOT NULL,
-	energy_delta_kwh DECIMAL(12,6) NOT NULL,
+	/*
+	 * Cumulative lifetime counters, stored exactly as the meter's registers
+	 * report them. Nothing derived is ever written here: per-interval energy
+	 * is computed at READ time by subtracting consecutive rows.
+	 *
+	 * That direction matters. A raw counter can always be re-derived into
+	 * deltas, including after a bug is fixed. A stored delta cannot be
+	 * un-mixed back into a counter if the arithmetic was ever wrong.
+	 *
+	 * DECIMAL, not FLOAT: 12 digits total, 6 after the point. Exact, so the
+	 * subtraction in step 3 cannot accumulate rounding drift.
+	 */
+	import_kwh DECIMAL(12,6) NOT NULL,
+	export_kwh DECIMAL(12,6) NOT NULL,
+	
+	
+	/*
+	 * Instantaneous power per phase, in watts. This is a RATE, not an
+	 * accumulation: it describes the instant of the reading, not the span
+	 * since the previous one. So it is never summed — averaging is the only
+	 * honest aggregation — and it must never share an axis with kWh.
+	 *
+	 * Three decimals is milliwatt resolution, finer than any real meter.
+	 */
+	power_l1_w DECIMAL(10,3) NOT NULL,
+	power_l2_w DECIMAL(10,3) NOT NULL,
+	power_l3_w DECIMAL(10,3) NOT NULL,
 	
 
 	-- with UNIQUE KEY, the database creates an extra internal data structure beside the main table storage.
@@ -106,7 +130,7 @@ CREATE TABLE IF NOT EXISTS meter_readings(
 
 -- The UNIQUE KEY creates a structure that works like this:
 -- "meter-001 | 2026-07-07 10:00 | 2026-07-07 10:15 -> id 1"
--- because the unique key is defined as: meter_id + window_start_utc + window_end_utc
+-- because the unique key is defined as: device_id + meter_id + pi_time_utc
 
 
 -- What the UNIQUE KEY costs:
